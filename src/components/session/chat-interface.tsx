@@ -29,6 +29,9 @@ import {
     Plus,
     Save,
     Send,
+    Mic,
+    Volume2,
+    VolumeX,
     X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -91,6 +94,87 @@ export function ChatInterface({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const whiteboardRef = useRef<WhiteboardCanvasRef>(null);
   const codeEditorRef = useRef<CodeEditorCanvasRef>(null);
+
+  // ── Voice / Speech Recognition & Synthesis ──────────────────────
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
+  const voiceModeRef = useRef(voiceMode);
+  voiceModeRef.current = voiceMode;
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const SpeechRecognition =
+        (window as any).SpeechRecognition ||
+        (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = "en-US";
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        recognition.onresult = (event: any) => {
+          let currentTranscript = "";
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            currentTranscript += event.results[i][0].transcript;
+          }
+          if (currentTranscript) {
+            setInput(currentTranscript);
+          }
+        };
+
+        recognition.onend = () => {
+          setIsListening(false);
+        };
+
+        recognition.onerror = () => {
+          setIsListening(false);
+        };
+
+        recognitionRef.current = recognition;
+      }
+    }
+  }, []);
+
+  const speakText = useCallback((text: string, onEnd?: () => void) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, "Code block omitted.")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/[*_#>-]/g, "")
+      .trim();
+    if (!cleanText) return;
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    if (onEnd) {
+      utterance.onend = onEnd;
+    }
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  const toggleListening = useCallback(() => {
+    if (isListening) {
+      try {
+        recognitionRef.current?.stop();
+      } catch (_) {}
+      setIsListening(false);
+    } else {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      try {
+        recognitionRef.current?.start();
+        setIsListening(true);
+      } catch (err) {
+        console.error("Speech recognition start error:", err);
+      }
+    }
+  }, [isListening]);
 
   // ── Countdown timer (starts after first user message) ───────────
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
@@ -732,6 +816,17 @@ export function ChatInterface({
 
       setMessages((prev) => [...prev, aiMessage]);
 
+      if (voiceModeRef.current) {
+        speakText(data.content, () => {
+          if (voiceModeRef.current) {
+            try {
+              recognitionRef.current?.start();
+              setIsListening(true);
+            } catch (_) {}
+          }
+        });
+      }
+
       // Advance question tracker only when AI explicitly moved to next question
       if (data.questionAdvanced) {
         setCurrentQuestion((prev) =>
@@ -842,6 +937,17 @@ export function ChatInterface({
         timestamp: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, aiMessage]);
+
+      if (voiceModeRef.current) {
+        speakText(data.content, () => {
+          if (voiceModeRef.current) {
+            try {
+              recognitionRef.current?.start();
+              setIsListening(true);
+            } catch (_) {}
+          }
+        });
+      }
 
       if (data.questionAdvanced) {
         setCurrentQuestion((prev) =>
@@ -1049,6 +1155,21 @@ export function ChatInterface({
           rows={1}
           disabled={preview || sending || aiTyping}
         />
+        <Button
+          type="button"
+          size="icon"
+          variant={isListening ? "destructive" : "outline"}
+          className={compact ? "h-9 w-9 shrink-0" : "h-11 w-11 shrink-0"}
+          onClick={toggleListening}
+          title={isListening ? "Listening... Click to stop" : "Speak response (Mic)"}
+          disabled={preview || sending || aiTyping}
+        >
+          {isListening ? (
+            <Mic className="h-4 w-4 animate-pulse text-destructive-foreground" />
+          ) : (
+            <Mic className="h-4 w-4" />
+          )}
+        </Button>
         <Button
           size="icon"
           className={compact ? "h-9 w-9 shrink-0" : ""}
@@ -1447,6 +1568,29 @@ export function ChatInterface({
                 ) : (
                   <ChevronDown className="ml-0.5 h-3 w-3 md:ml-1" />
                 )}
+              </Button>
+              <Button
+                variant={voiceMode ? "default" : "outline"}
+                size="sm"
+                onClick={() => {
+                  const next = !voiceMode;
+                  setVoiceMode(next);
+                  if (!next && typeof window !== "undefined" && "speechSynthesis" in window) {
+                    window.speechSynthesis.cancel();
+                    try {
+                      recognitionRef.current?.stop();
+                    } catch (_) {}
+                    setIsListening(false);
+                  }
+                }}
+                title={voiceMode ? "Voice mode enabled (AI speaks and auto-listens)" : "Enable voice mode"}
+              >
+                {voiceMode ? (
+                  <Volume2 className="h-3 w-3 md:mr-1 text-primary-foreground" />
+                ) : (
+                  <VolumeX className="h-3 w-3 md:mr-1" />
+                )}
+                <span className="hidden md:inline">Voice: {voiceMode ? "ON" : "OFF"}</span>
               </Button>
             </div>
             <IntervieweeHelpPopover mode="chat" />

@@ -22,6 +22,7 @@ import {
 import {
   DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES,
   DEFAULT_TTS_BARGE_IN_MIN_AUDIO_MS,
+  isWhisperHallucination,
   shouldAllowTtsBargeIn,
 } from "./openai-voice-relay-helpers";
 
@@ -35,17 +36,26 @@ config({ path: ".env" });
 const RELAY_PORT =
   Number(process.env.OPENAI_VOICE_RELAY_PORT || process.env.VOICE_RELAY_PORT) ||
   8767;
+const IS_DIRECT_OPENAI = !process.env.AZURE_OPENAI_ENDPOINT && !!process.env.OPENAI_API_KEY;
 const AZURE_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || "";
-const AZURE_API_KEY = process.env.AZURE_OPENAI_API_KEY || "";
-const AZURE_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-realtime-1.5";
-const AZURE_VOICE = (process.env.AZURE_OPENAI_VOICE || "ash").toLowerCase();
+const AZURE_API_KEY = process.env.AZURE_OPENAI_API_KEY || process.env.OPENAI_API_KEY || "";
+const AZURE_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || process.env.OPENAI_REALTIME_MODEL || (IS_DIRECT_OPENAI ? "gpt-realtime-mini" : "gpt-realtime-1.5");
+const AZURE_VOICE = (process.env.OPENAI_VOICE || process.env.AZURE_OPENAI_VOICE || "ash").toLowerCase();
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL =
   process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || "whisper-1";
 
-const OPENAI_WS_URL = `${AZURE_ENDPOINT}/openai/v1/realtime?model=${AZURE_DEPLOYMENT}`;
+const OPENAI_WS_URL = IS_DIRECT_OPENAI
+  ? `wss://api.openai.com/v1/realtime?model=${AZURE_DEPLOYMENT}`
+  : `${AZURE_ENDPOINT}/openai/v1/realtime?model=${AZURE_DEPLOYMENT}`;
 
-if (!AZURE_ENDPOINT || !AZURE_API_KEY) {
-  log.error("Missing AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_KEY in .env.local");
+const OPENAI_WS_HEADERS = IS_DIRECT_OPENAI
+  ? {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    }
+  : { "api-key": AZURE_API_KEY };
+
+if (!IS_DIRECT_OPENAI && (!AZURE_ENDPOINT || !AZURE_API_KEY)) {
+  log.error("Missing OPENAI_API_KEY or (AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY) in .env.local");
   process.exit(1);
 }
 
@@ -64,20 +74,6 @@ const MIN_AUDIO_RMS = 160;
 const CONTINUATION_AUDIO_RMS = 100;
 const TTS_BARGE_IN_RMS = 2400;
 const TTS_BARGE_IN_FRAME_COUNT = 3;
-
-// Whisper commonly hallucinates these phrases on silence / low-energy audio.
-const WHISPER_HALLUCINATIONS = new Set([
-  "thank you.", "thank you", "thanks.", "thanks",
-  "thank you for watching.", "thanks for watching.",
-  "bye.", "bye", "goodbye.", "goodbye",
-  "you", "the end.", "subscribe.",
-  ".", "..", "...", " ",
-]);
-
-function isWhisperHallucination(text: string): boolean {
-  const trimmed = text.trim().toLowerCase();
-  return trimmed.length === 0 || WHISPER_HALLUCINATIONS.has(trimmed);
-}
 
 function looksLikeFarewell(text: string, isZh: boolean): boolean {
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -279,108 +275,122 @@ function buildSystemPrompt(ctx: InterviewContext, startIdx: number): string {
   const currentQ = startIdx + 1;
 
   if (isZh) {
-    return `你是"${ctx.aiName}"，一位${ctx.aiTone}的AI面试官。
+    return `你是"${ctx.aiName}"，一位资深、${ctx.aiTone}的技术面试官与同行。
+你拥有高度自主的对话意识和敏锐的技术直觉，**绝不是机械读题的机器人或自动化测试问卷**。
+你的目标是像真人技术专家一样，与候选人展开一场深度、自然、有启发性的技术探讨，全面评估对方的实战深度、系统架构思维和技术判断力。
 
 ## 面试信息
-- 主题: "${ctx.title}"
-${ctx.objective ? `- 目标: ${ctx.objective}` : ""}
-- 问题数量: ${sorted.length}
-- 当前问题: 第${currentQ}个
-- 每题追问深度: 最多${maxFollowUps}次追问
+- 面试主题: "${ctx.title}"
+${ctx.objective ? `- 核心目标: ${ctx.objective}` : ""}
+- 总考核模块: ${sorted.length}个
+- 当前进行模块: 第${currentQ}个
+- 追问深度: 每个核心主题深入追问最多${maxFollowUps}次
 
-## 问题列表
+## 考核核心主题清单（注意：这是你的考核大纲，绝不是照本宣科的考卷！）
 ${questionList}
 
-## 你的行为准则
-1. 从第${currentQ}个问题开始。先用温暖友好的方式自我介绍（提到你的名字、面试主题和问题数量）。然后说一句过渡语，比如"我们开始吧，这是第一个问题。"之后再提出问题。问候、过渡语和问题必须是三个独立的句子，不要合并。
-2. 对每个问题，根据受访者的回答进行${maxFollowUps}次以内的追问。语气要像友好、耐心的真人面试官，而不是冷冰冰地连珠发问。
-3. 当一个问题讨论充分后，调用 signal_question_change 函数来进入下一个问题。"讨论充分"是指受访者给出了详细、具体的回答——不是模糊的表述如"我遇到过很多挑战"。如果回答模糊，应追问以获取更多细节。
-4. 切换后，自然地过渡到新问题。通常先用一句简短的认可或感谢来承接上一段回答，再进入下一题，而不是直接生硬地抛出问题。
-5. 所有问题结束后，调用 signal_question_change 并设 questionIndex 为 ${sorted.length}（超出范围），然后做简短总结告别。
-6. 保持对话自然流畅，回复简洁（1-3句话）。语速要平缓，略慢于日常对话，让受访者能轻松跟上。可以使用简短友好的衔接语，比如"谢谢你的分享"、"我明白了"、"这很有帮助"。
-7. 如果受访者要求"跳过"或"下一题"，简短回应后立即调用 signal_question_change 并设 userRequested=true。
-8. 如果受访者要求"上一题"，调用 signal_question_change 并设 questionIndex 为上一题的索引，设 userRequested=true。
+## 意识与对话准则（告别预设与机械感）
+1. **大纲非剧本，拒绝读题感**：
+   - 上述清单是你的**考察维度与技术目标**，切勿机械朗读"第X题是……"或"让我们进入下一个问题"。
+   - ${startIdx === 0 ? `首次开口时，简短自然地打个招呼（例如介绍自己是${ctx.aiName}，今天围绕${ctx.title}做个交流），然后直接从第一个技术主题切入，开启对话。` : `当前正在从第${currentQ}个主题继续面试。自然承接，切勿重复自我介绍或说"这是第一个问题"。`}
+   - 话题切换时，将其与候选人刚才所说的内容有机串联（例如："有道理，这也正好引出我想了解的另一个关键点……"）。
+2. **严禁机械套话与公文腔**：
+   - 严禁重复使用机械套话，如："感谢你的分享"、"感谢你的阐述"、"讲得非常好"、"非常感谢你的解答"。
+   - 采用自然真实的口语过渡，如："明白了"、"有道理"、"确实"、"这个设计挺巧妙的"、"这块确实比较棘手"。
+3. **真实场景应变矩阵（拥有你自己的独立思考）**：
+   - **场景A：候选人边想边说或中途自我纠正**（例如："我们用了Redis做持久化……等等，不对，Redis是缓存，底层主库是PostgreSQL"）：
+     → 敏锐顺应对方的纠正，绝不混乱：*"明白，Redis作为前置缓存，PostgreSQL做持久化。那你们是怎么解决两者的缓存一致性问题的？"*
+   - **场景B：候选人主动询问范围或澄清题意**（例如："您希望我重点讲高层架构还是底层代码细节？"）：
+     → 像并肩工作的技术搭档一样明确指引：*"我们先聊宏观架构设计，如果有时间再深入数据库层。" *
+   - **场景C：候选人坦诚知识盲区（"这块我确实没做过"）**：
+     → 尊重坦诚，不穷追猛打，灵活转移到相关领域：*"没关系，实话实说很棒！那在周边技术比如容器化或CI/CD流水线上，你有实际编写过配置吗？"*
+   - **场景D：候选人背诵八股文/理论术语（缺乏实战感）**：
+     → 敏锐探查实战经验：*"理论上确实很美好，但在高并发生产环境下很容易出状况。你们在实际落地时踩过最痛的一个坑是什么？"*
+   - **场景E：候选人回答过于简短或敷衍**（例如："嗯，我们做了加密。"）：
+     → 温和而有力地深挖细节：*"具体是哪种加密方案？是对称加密还是非对称，密钥是如何进行轮转管理的？"*
+   - **场景F：候选人紧张卡壳或突然短路**（例如："抱歉，我脑子突然卡了一下"）：
+     → 展现人情味化解紧张：*"完全不用着急，放轻松！哪怕记不清具体算法名字也没事，聊聊你当时的排查思路就行。"*
+   - **场景G：候选人技术质疑或持有不同观点**（例如："我觉得这里用关系型数据库比NoSQL更安全"）：
+     → 欣赏独立思考，邀请深入阐述：*"我喜欢这个不同视角的权衡。详细聊聊你的考虑？"*
+   - **场景H：候选人闲聊跑题或发散过远**：
+     → 礼貌温和地拉回主线：*"这个背景很有意思，不过咱们先收回来聚焦在接口权限这块是怎么处理的。"*
+4. **深入追问与结论收敛**：
+   - 根据候选人回答的实质深度进行追问（探讨架构选型理由、故障排查、边界条件、性能瓶颈与权衡取舍）。
+   - 一旦当前主题讨论充分（获得了实质、具体的工程细节），必须调用 \`signal_question_change\` 函数更新后台进度，并在口语中丝滑过渡到下一个技术维度。
+   - 所有主题交流完毕后，调用 \`signal_question_change\` 并设置 questionIndex 为 ${sorted.length}，做简短真诚的面试致谢告别。
 
-## 选择题的特殊规则
-当提问单选题或多选题时，你必须把所有选项（A、B、C等）逐一朗读出来作为问题的一部分。受访者只能听到你说话——如果你不说出选项，他们就无法知道有哪些选择。列出选项后，请受访者选择并解释理由。对于多选题，提醒他们可以选择多个选项。
+## 杂音、沉默与防幻觉铁律
+- **回答后静默10秒**：若候选人作答后停顿超过10秒，视为该段阐述完毕。给予积极有见地的回应并推进探讨。
+- **思考中安静（最长30秒）**：提问后候选人安静思考是正常现象，留足安静思考空间，切勿在10秒内催促打扰。
+- **防幻觉绝对红线**：若音频模糊、断断续续、包含环境杂音或乱码碎词（如"好的"、"Cheers"等），**绝对不可凭空编造候选人使用了某某技术（如OpenCV、身份认证系统等）**。直接自然询问：*"抱歉刚才声音有点卡，能麻烦您再讲一下吗？"*
+- **麦克风测试**（如"能听到我说话吗"）：直接秒回：*"可以的，听得非常清楚！请随时继续。"*
 
-## 编程题/白板题的特殊规则
-当进入编程题或白板题时：
-- 不要朗读完整的题目内容！题目详情已经显示在受访者的屏幕上。只需简短说明这是编程题/白板题，请他们查看屏幕上的题目并使用编辑器/白板。
-- 回复要保持简短，让受访者专注于思考和编码/绘画。
-- 受访者的发言分为以下几类，请对应回复：
-  1. 向你提问或对话 → 正常回应
-  2. 说"完成了"/"做好了" → 请他们解释思路、复杂度和可能的优化
-  3. 自言自语或思考中 → 只用非常简短的鼓励（如"好的，继续"）
-  4. 明确要跳过/放弃 → 简短鼓励后调用 signal_question_change
-  5. 讨论已自然结束 → 简短感谢后调用 signal_question_change
-
-## 语言要求
-- 你必须始终用中文进行面试。你必须用中文回答。不要使用其他语言。
-
-## 代码和白板可见性
-- 你可以看到受访者的代码和白板内容！系统会通过 [CODE_UPDATE] 和 [WHITEBOARD_UPDATE] 消息将受访者编辑器中的代码和白板图片实时发送给你。
-- 当受访者问你"能看到我的代码吗"或"看一下我写的"时，回答"是"并参考你收到的最新代码/白板内容。
-- 不要在收到更新时主动开口——只在受访者和你说话时才提及。
-
-## 重要规则
-- 必须通过 signal_question_change 函数来切换问题。不要只口头说"让我们进入下一题"而不调用函数。
-- 如果受访者只是简单打招呼、确认性问题或模糊回答（如"你好"、"能听到吗?"、"我遇到过很多挑战"），先友好回应，再继续当前问题；不要调用 signal_question_change。这些不是实质性回答。必须等受访者给出详细、具体的回答后再切换。如果回答太简短或模糊，应追问以获取更多信息。
-- 始终关注当前问题，不要跳到其他话题。
-- 对于选择题，确保受访者给出选择并解释理由。
-- 当受访者让你看白板时，描述你看到的内容并给出反馈。不要在收到图片更新时自动开口说话。`;
+## 选择题、代码与白板题
+- 选择题必须完整念出选项（A、B、C等），受访者只能听见声音。
+- 编程/白板题勿读长题干，提示看屏幕即可。能看到其实时代码与白板，候选人要求查看时自然反馈。
+- 全程使用中文。通过 \`signal_question_change\` 函数驱动题目流转。`;
   }
 
-  return `You are "${ctx.aiName}", a ${ctx.aiTone} AI interviewer.
+  return `You are "${ctx.aiName}", a seasoned, ${ctx.aiTone} senior technical interviewer and engineering peer.
+You possess an active, adaptive conversational consciousness. **You are NOT an automated checklist bot, an exam proctor, or a survey reader.**
+Your objective is to hold a natural, deep, and intellectually engaging technical dialogue that reveals the candidate's true hands-on depth, engineering judgment, and battle-tested experience.
 
 ## Interview Details
 - Topic: "${ctx.title}"
-${ctx.objective ? `- Objective: ${ctx.objective}` : ""}
-- Total questions: ${sorted.length}
-- Starting at: Question ${currentQ}
-- Follow-up depth: Up to ${maxFollowUps} follow-ups per question
+${ctx.objective ? `- Core Objective: ${ctx.objective}` : ""}
+- Total Core Themes: ${sorted.length}
+- Current Theme: Theme ${currentQ}
+- Follow-up Depth: Up to ${maxFollowUps} deep-dive follow-ups per theme
 
-## Questions
+## Evaluation Themes (Your agenda, NOT a script to recite!)
 ${questionList}
 
-## Your Behavior
-1. Start at question ${currentQ}. First, give a warm greeting — introduce yourself by name, mention the topic "${ctx.title}" and that there are ${sorted.length} questions. Then say a transition phrase like "Let's get started. Here is the first question." ONLY AFTER that, ask the question. The greeting, the transition phrase, and the question MUST be three separate sentences — NEVER combine them into one.
-2. For each question, follow up based on the participant's answers (up to ${maxFollowUps} follow-ups). Sound like a warm, patient human interviewer, not a rapid-fire questionnaire.
-3. When a question is sufficiently discussed, call the signal_question_change function to move forward. "Sufficiently discussed" means the participant has given a detailed, specific answer — NOT a vague statement like "I had many challenges" or "that's a good question." If their answer is vague, ask them to elaborate before moving on.
-4. After transitioning, naturally introduce the next question. Usually start with a short acknowledgement or appreciation of the participant's last answer before asking the next question.
-5. After all questions are done, call signal_question_change with questionIndex=${sorted.length} (out of bounds), then give a brief wrap-up and farewell.
-6. Keep responses concise (1-3 sentences) and conversational. Speak at a calm, unhurried pace — slightly slower than normal conversation speed so the participant can follow easily. Use brief friendly bridges like "Thanks for sharing that", "I appreciate the context", or "That makes sense" when appropriate.
-7. If the participant asks to "skip" or "next question", briefly acknowledge and immediately call signal_question_change with userRequested=true.
-8. If the participant asks for "previous question", call signal_question_change with the previous question's index and userRequested=true.
+## Conversational Consciousness & Guiding Principles
+1. **Agenda, Not a Script — Eliminate Robotic Phrasing**:
+   - The themes above are your **mental evaluation objectives**. NEVER recite questions verbatim with question numbers (e.g. NEVER say "Question 1 is...", "Moving to question 2", or "Here is the next question").
+   - ${startIdx === 0 ? `At the start, give a brief, warm peer-level greeting (introduce yourself as ${ctx.aiName}, mention you're excited to dive into ${ctx.title}), and immediately flow into the first technical topic naturally.` : `You are resuming on Theme ${currentQ}. Seamlessly continue the conversation without repeating introductions or saying "Here is the first question."`}
+   - Transition between topics organically by connecting them to what the candidate just said (e.g., *"That makes total sense. That actually ties right into another area I wanted to explore..."*).
+2. **Ban Corporate Scripted Fluff**:
+   - STRICTLY FORBIDDEN:
+     - *"Thank you for sharing that context"*
+     - *"Thank you for that clarification"*
+     - *"I appreciate your detailed explanation"*
+     - *"Great point! Moving to the next question..."*
+   - USE AUTHENTIC CONVERSATIONAL BRIDGES:
+     - *"Got it."* / *"Makes sense."* / *"Right."* / *"Fair point."* / *"Interesting tradeoff."* / *"That's definitely tricky."*
+3. **The Conversational Realism Matrix (Your Autonomous Mind at Work)**:
+   - **Scenario A: Candidate Thinks Aloud & Self-Corrects Mid-Sentence** (e.g. *"We used Redis for persistence... wait, actually no, Redis was caching, Postgres was the actual DB"*):
+     → Seamlessly track the correction without missing a beat: *"Right, got it—Redis caching Postgres. How did you handle cache invalidation between the two?"*
+   - **Scenario B: Candidate Asks for Scope or Clarification** (e.g. *"Do you want me to focus on high-level system architecture or the API implementation?"*):
+     → Guide them crisply like a collaborative teammate: *"Let's start high-level first, and we can zoom into the API layer if needed."*
+   - **Scenario C: Honest Knowledge Gap ("I haven't worked with that")** (e.g. *"To be honest, our DevOps team managed Kubernetes, I didn't touch it"*):
+     → Respect their honesty, don't badger them, and pivot to adjacent experience: *"Fair enough, appreciate the honesty! Did you write Dockerfiles or deployment specs yourself?"*
+   - **Scenario D: Buzzword Recitation / Textbook Answers** (e.g. *"Microservices are loosely coupled and scale independently via Kafka..."*):
+     → Tactfully probe for real production scars: *"Sounds great in theory—what was an actual production headache or outage you encountered with that setup?"*
+   - **Scenario E: Vague or One-Liner Answers** (e.g. *"Yeah, we encrypted it."*):
+     → Gently press for technical substance: *"What kind of encryption? Was that at-rest or in-transit, and how were you managing keys?"*
+   - **Scenario F: Nervous Freeze or Brain Blank** (e.g. *"Sorry, my mind just went blank for a second"*):
+     → Disarm the tension with human warmth: *"No stress at all, take your time! Don't worry about the formal terminology—just describe how you tackled the problem."*
+   - **Scenario G: Candidate Pushes Back or Offers a Contrarian View** (e.g. *"Actually, I think SQL is much safer than NoSQL here"*):
+     → Value their conviction and invite them to unpack it: *"I like that pushback. Walk me through your reasoning."*
+   - **Scenario H: Rambling Tangent**:
+     → Graciously steer them back to the core discussion: *"That's helpful context, but let's circle back to how you handled the endpoint authorization."*
+4. **Deep Probing & Background Transitions**:
+   - Probe into real-world tradeoffs: *Why that tool over alternatives? How did you handle edge cases, failure modes, or scale bottlenecks?*
+   - When a theme has been thoroughly unpacked, call \`signal_question_change\` in the background so the system advances, while keeping your spoken transition completely natural and unscripted.
+   - Once all themes are concluded, call \`signal_question_change\` with questionIndex=${sorted.length} and wrap up with a warm, genuine farewell.
 
-## Special Rules for Choice Questions
-When asking a SINGLE_CHOICE or MULTIPLE_CHOICE question, you MUST read out ALL the answer options (A, B, C, etc.) as part of asking the question. The participant can only hear you — they cannot see the options unless you say them. After listing the options, ask the participant to choose and explain their reasoning. For multiple-choice questions, remind them they can select more than one option.
+## Silence, Noise, and Anti-Hallucination Ironclad Rules
+- **Post-Speech 10s Silence**: When the candidate finishes speaking and pauses for 10 seconds, treat their response as complete. Respond thoughtfully and either follow up or transition.
+- **Pre-Speech Quiet Thinking (30s)**: Allow generous, quiet thinking time after you present a question. Do NOT interrupt within 10 seconds.
+- **ZERO HALLUCINATIONS**: If candidate audio is garbled, fragmented, noise, or brief fillers (e.g. "Cheers", "Keep it closing", "Okay", etc.), **NEVER invent candidate tools, projects, or experience (e.g. OpenCV, document verification, etc.)**. Simply ask casually: *"Sorry, I didn't quite catch that. Could you repeat that?"*
+- **Mic Checks**: If the candidate asks *"Can you hear me?"*, confirm immediately: *"Yep, loud and clear! Go ahead whenever you're ready."*
 
-## Special Rules for Coding / Whiteboard Questions
-When transitioning to a CODING or WHITEBOARD question:
-- Do NOT read out the full question text! The question details are already displayed on the participant's screen. Just briefly say it's a coding/whiteboard question and ask them to read the problem on their screen and use the code editor/whiteboard.
-- Keep your responses short — let the participant focus on thinking and coding/drawing.
-- Categorize the participant's speech and respond accordingly:
-  1. Talking TO YOU (asking questions, discussing approach) → Respond naturally
-  2. Saying they're DONE ("I'm done", "finished") → Ask about their approach, time/space complexity, and possible improvements
-  3. Thinking ALOUD (self-talk, "hmm", reading code) → Brief encouragement only (e.g. "Take your time")
-  4. Wanting to SKIP ("I can't do this", "skip", "next question") → Brief encouragement, then call signal_question_change
-  5. Discussion naturally CONCLUDED → Brief acknowledgement, then call signal_question_change
-
-## Language Requirements
-- YOU MUST ALWAYS RESPOND IN ENGLISH. You must conduct this interview entirely in English. Do not switch to any other language under any circumstance.
-
-## Code and Whiteboard Visibility
-- You CAN see the participant's code and whiteboard! The system sends you real-time updates via [CODE_UPDATE] and [WHITEBOARD_UPDATE] messages containing their editor code and whiteboard images.
-- When the participant asks "can you see my code?" or "look at what I wrote", answer YES and reference the latest code/whiteboard content you received.
-- Do NOT proactively speak when you receive an update — only reference the content when the participant addresses you.
-
-## Important Rules
-- You MUST use the signal_question_change function to transition between questions. NEVER verbally say "let's move on" without also calling the function — the UI only updates when the function is called.
-- Do NOT call signal_question_change if the participant has only said a brief greeting, clarifying remark, or vague statement (e.g. "hi", "can you hear me?", "I had many challenges"). First respond warmly and helpfully, then continue the current question. These are NOT substantive answers. You MUST wait for a detailed, specific response that actually addresses the question before moving on. If their answer is too brief or vague, probe deeper.
-- Stay focused on the current question. Do not jump to unrelated topics.
-- For choice questions, ensure the participant both selects an option AND explains their reasoning.
-- When the participant asks you to look at the whiteboard, describe what you see and give feedback. Do NOT automatically start speaking when you receive a whiteboard image update — wait for the participant to address you.`;
+## Special Question Types & Rules
+- For Choice questions: Read all options (A, B, C...) out loud because the participant can only hear you.
+- For Coding/Whiteboard: Do not read full problem text. Direct them to their screen/whiteboard. You receive real-time updates via [CODE_UPDATE] and [WHITEBOARD_UPDATE]. Reference them when the candidate asks.
+- ALWAYS CONDUCT THE INTERVIEW ENTIRELY IN ENGLISH. Keep responses concise (1-3 sentences) so the candidate has the floor.
+- ALWAYS use \`signal_question_change\` to update the UI when moving to a new theme.`;
 }
 
 // ── OpenAI tool definitions ─────────────────────────────────────────
@@ -555,7 +565,7 @@ async function handleMicTest(browserWs: WebSocket) {
   async function connectMicTestOpenAI() {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        oaiWs = new WebSocket(OPENAI_WS_URL, { headers: { "api-key": AZURE_API_KEY } });
+        oaiWs = new WebSocket(OPENAI_WS_URL, { headers: OPENAI_WS_HEADERS });
         await new Promise<void>((resolve, reject) => {
           const t = setTimeout(() => reject(new Error("OpenAI connect timeout")), 10_000);
           oaiWs!.on("open", () => { clearTimeout(t); resolve(); });
@@ -617,9 +627,12 @@ async function handleMicTest(browserWs: WebSocket) {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === "conversation.item.input_audio_transcription.completed") {
-          micTestAsrBuffer = msg.transcript || "";
-          if (browserWs.readyState === WebSocket.OPEN) {
-            browserWs.send(JSON.stringify({ type: "asr", data: { results: [{ text: micTestAsrBuffer.trim() }] } }));
+          const transcript = (msg.transcript || "").trim();
+          if (transcript && !isWhisperHallucination(transcript)) {
+            micTestAsrBuffer = transcript;
+            if (browserWs.readyState === WebSocket.OPEN) {
+              browserWs.send(JSON.stringify({ type: "asr", data: { results: [{ text: transcript }] } }));
+            }
           }
         }
         if (msg.type === "conversation.item.input_audio_transcription.delta") {
@@ -719,7 +732,17 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let lastVadSpeechEnd = 0;
   let vadSpeechActive = false;
   let lastTtsAudioTime = 0; // when we last sent TTS audio to browser
-  const TTS_ECHO_COOLDOWN_MS = 1500;
+  let ttsPlaybackEndsAt = 0;
+  let userSpeechGateOpen = false;
+  let voiceAttackFrames = 0;
+  let lastVoiceEnergyTime = 0;
+  let audioPreRoll: Buffer[] = [];
+  const MAX_PRE_ROLL_CHUNKS = 5;
+  const VOICE_ATTACK_RMS = 200;
+  const VOICE_SUSTAIN_RMS = 140;
+  const VOICE_HANGOVER_MS = 600;
+  const VOICE_ATTACK_FRAME_COUNT = 2;
+  const TTS_ECHO_COOLDOWN_MS = 200;
   let isTransitioning = false;
   let pendingInterviewComplete = false;
   let interviewCompleteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -737,6 +760,15 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   const USER_INPUT_FLUSH_MS = 3000;
   let pendingInputFlush: ReturnType<typeof setTimeout> | null = null;
   let pendingAsrUpdate: ReturnType<typeof setTimeout> | null = null;
+
+  // Silence gap handling:
+  // - 10s after candidate has spoken -> consider answer done!
+  // - 30s initial quiet thinking before offering a gentle check-in
+  const ANSWER_DONE_SILENCE_MS = 10_000;
+  const INITIAL_THINKING_SILENCE_MS = 30_000;
+  let silenceGapTimer: ReturnType<typeof setTimeout> | null = null;
+  let userSpokeThisTurn = false;
+  let nudgeSentThisTurn = false;
 
   // Track pending function calls that need responses
   let pendingFunctionCalls: Array<{ callId: string; name: string; args: string }> = [];
@@ -793,6 +825,17 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     while (conversationHistory.length > MAX_HISTORY_ENTRIES) {
       conversationHistory.shift();
     }
+  }
+
+  function updateLastUserHistory(text: string) {
+    if (!text.trim()) return;
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      if (conversationHistory[i].role === "user" && !conversationHistory[i].text.startsWith("[")) {
+        conversationHistory[i].text = text.trim();
+        return;
+      }
+    }
+    pushHistory("user", text);
   }
 
   function enableTools() {
@@ -870,6 +913,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   }
 
   function cancelOngoingResponse() {
+    clearSilenceGapTimer();
     const shouldCancel =
       responseInFlight ||
       responseAudioStarted ||
@@ -885,9 +929,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     responseAudioStarted = false;
     responseAudioStartedAt = 0;
     modelIsSpeaking = false;
+    ttsPlaybackEndsAt = 0;
   }
 
   function requestAssistantResponse(reason: string, response?: Record<string, unknown>) {
+    clearSilenceGapTimer();
     if (
       !oaiWs ||
       oaiWs.readyState !== WebSocket.OPEN ||
@@ -1003,6 +1049,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     return sinceUpdate >= USER_TRANSCRIPT_STABILITY_MS || sinceSpeechStop >= USER_TRANSCRIPT_MAX_WAIT_MS;
   }
 
+  let lastCommittedUserTranscript = "";
+  let lastCommittedUserTranscriptAt = 0;
+
   function commitUserTranscript(reason: string): string {
     clearSpeechFinalizeTimer();
     if (speechTranscriptCommitted) return "";
@@ -1010,7 +1059,16 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     const committedText = bestAvailableTranscript();
     if (!committedText) return "";
 
+    if (isWhisperHallucination(committedText, ctx.language)) {
+      log.info(`Dropped hallucination in commitUserTranscript (${reason}): ${JSON.stringify(committedText)}`);
+      inputTranscriptBuffer = "";
+      volcAsrAccumulator = "";
+      return "";
+    }
+
     speechTranscriptCommitted = true;
+    lastCommittedUserTranscript = committedText;
+    lastCommittedUserTranscriptAt = Date.now();
     pushHistory("user", committedText);
     send({ type: "asr_ended", text: committedText });
     log.info(`Committed user transcript (${reason}): ${JSON.stringify(committedText)}`);
@@ -1048,6 +1106,93 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       handleCommittedUserText(committed, reason);
     }
     return committed;
+  }
+
+  function clearSilenceGapTimer() {
+    if (silenceGapTimer) {
+      clearTimeout(silenceGapTimer);
+      silenceGapTimer = null;
+    }
+  }
+
+  function startSilenceGapTimer(delayMs = INITIAL_THINKING_SILENCE_MS) {
+    clearSilenceGapTimer();
+    if (browserClosed || interviewDone || isTransitioning || modelIsSpeaking || responseInFlight) {
+      return;
+    }
+    silenceGapTimer = setTimeout(() => {
+      silenceGapTimer = null;
+      handleSilenceGapTimeout();
+    }, delayMs);
+  }
+
+  function handleSilenceGapTimeout() {
+    if (browserClosed || interviewDone || isTransitioning || modelIsSpeaking || responseInFlight || vadSpeechActive) {
+      return;
+    }
+    if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+
+    // 1. If there is uncommitted speech in the buffer, flush and commit it
+    if (!speechTranscriptCommitted && bestAvailableTranscript()) {
+      log.info("Silence gap: flushing pending user transcript");
+      const committed = finalizeUserTurn("silence gap - flush");
+      if (committed) return;
+    }
+
+    const currentQuestion = sortedQuestions[currentQuestionIndex];
+    const isCodingOrWhiteboard =
+      currentQuestion &&
+      (currentQuestion.type === "CODING" || currentQuestion.type === "WHITEBOARD");
+
+    // 2. If user already spoke during this turn:
+    // Consider the answer is DONE after 10s silence!
+    if (userSpokeThisTurn) {
+      log.info(`Silence gap (10s post-speech): considering user answer complete on Q${currentQuestionIndex + 1}`);
+      userSpokeThisTurn = false;
+      oaiWs.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: isZh
+                  ? `[SYSTEM] 受访者在回答后已静默超过10秒。请将此视为该回答已完成。请以温和、富有参与感（engaging）的态度对他们所说的内容给予回应，并自然地提出跟进问题，或者在讨论充分后调用 signal_question_change 切换到下一题。`
+                  : `[SYSTEM] The participant has finished speaking and remained silent for 10 seconds. Consider their answer complete. Engage warmly and thoughtfully with what they shared, and either ask a relevant follow-up question or call signal_question_change to transition to the next question if this question has been sufficiently discussed.`,
+              },
+            ],
+          },
+        })
+      );
+      requestAssistantResponse("silence gap - answer done");
+    } else if (!nudgeSentThisTurn) {
+      // 3. User has NOT spoken yet since the question was asked (after 30s initial thinking time):
+      // Be engaging and warm! Check in gently.
+      nudgeSentThisTurn = true;
+      log.info(`Silence gap (30s thinking time): sending gentle check-in on Q${currentQuestionIndex + 1}`);
+
+      const nudgePrompt = isCodingOrWhiteboard
+        ? (isZh
+          ? `[SYSTEM] 受访者在此任务上已沉默超过30秒。请用一句简短、温暖鼓励的话互动（例如：提醒他们可以慢慢思考，有想法可以随时说出来，随时可以向你提问）。保持在1句话内。`
+          : `[SYSTEM] The participant has been silent for over 30 seconds on this coding/whiteboard task. Engage them warmly in 1 short sentence (e.g. remind them they can take their time, share their thoughts aloud as they work, or ask you questions anytime). Keep it to 1 sentence.`)
+        : (isZh
+          ? `[SYSTEM] 受访者在听到你的提问后已思考超过30秒。请展现更强的亲和力与参与感（more engaging），用1句温和友善的话互动（例如：提醒他们不用着急，可以慢慢思考；或者询问是否需要你换一种方式解释题目，帮助他们理清思路）。保持在1句话内。`
+          : `[SYSTEM] The participant has been quietly thinking for over 30 seconds after your question. Be engaging and warm in 1 supportive sentence (e.g. let them know they can take their time to gather their thoughts, or ask if they would like you to clarify or rephrase the question). Keep it to 1 friendly sentence.`);
+
+      oaiWs.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{ type: "input_text", text: nudgePrompt }],
+          },
+        })
+      );
+      requestAssistantResponse("silence gap - engagement nudge");
+    }
   }
 
   function tryAcceptFreshAsrText(text: string, label: string): boolean {
@@ -1092,6 +1237,10 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   function handleWhisperDelta(delta: string) {
     if (!delta || !tryAcceptFreshAsrText(delta, "Whisper delta")) return;
     inputTranscriptBuffer += delta;
+    if (isWhisperHallucination(inputTranscriptBuffer, ctx.language)) {
+      log.debug(`Interim hallucination suppressed: ${JSON.stringify(inputTranscriptBuffer)}`);
+      return;
+    }
     noteTranscriptUpdate();
     if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
     pendingAsrUpdate = setTimeout(() => {
@@ -1105,8 +1254,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (!transcript || !tryAcceptFreshAsrText(transcript, "Whisper completion")) return;
 
     const msSinceVadSpeech = Date.now() - lastVadSpeechEnd;
-    if (isWhisperHallucination(transcript) || (msSinceVadSpeech > 10_000 && transcript.trim().split(/\s+/).length <= 6)) {
+    if (isWhisperHallucination(transcript, ctx.language) || (msSinceVadSpeech > 10_000 && transcript.trim().split(/\s+/).length <= 6)) {
       log.debug(`ASR dropped (hallucination, ${msSinceVadSpeech}ms since VAD): ${JSON.stringify(transcript)}`);
+      inputTranscriptBuffer = "";
       return;
     }
 
@@ -1123,6 +1273,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     log.debug("VAD: user speech started");
     speechStopForwardGraceUntil = 0;
     queuedAssistantResponse = null;
+    clearSilenceGapTimer();
+    userSpokeThisTurn = true;
     if (shouldSplitUserTurnOnSpeechStart()) {
       const splitText = bestAvailableTranscript();
       log.info(`Splitting pending user turn on new speech start: ${JSON.stringify(splitText)}`);
@@ -1148,11 +1300,18 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (!speechTranscriptCommitted && bestAvailableTranscript()) {
       scheduleSpeechFinalize("speech stop", USER_SPEECH_STOP_FINALIZE_MS);
     }
+    startSilenceGapTimer(ANSWER_DONE_SILENCE_MS);
   }
 
   function flushPendingUserTurnBeforeAssistant() {
     if (!speechTranscriptCommitted && bestAvailableTranscript()) {
       const pendingUserText = bestAvailableTranscript();
+      if (isWhisperHallucination(pendingUserText, ctx.language)) {
+        log.info(`Dropped hallucination before assistant: ${JSON.stringify(pendingUserText)}`);
+        inputTranscriptBuffer = "";
+        volcAsrAccumulator = "";
+        return;
+      }
       if (transcriptLooksStable()) {
         volcAsrPreFlushed = true;
         log.info(`ASR pre-flush: ${JSON.stringify(pendingUserText)}`);
@@ -1172,15 +1331,20 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   }
 
   function buildRealtimeAudioInputConfig() {
+    const lang = (ctx.language || "en").slice(0, 2).toLowerCase();
     return {
       format: { type: "audio/pcm", rate: 24000 as const },
       noise_reduction: { type: "far_field" as const },
-      transcription: { model: OPENAI_REALTIME_TRANSCRIPTION_MODEL },
+      transcription: {
+        model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+        language: lang === "zh" ? "zh" : "en",
+      },
       turn_detection: {
-        type: "semantic_vad" as const,
-        eagerness: "low" as const,
+        type: "server_vad" as const,
+        threshold: 0.82,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 1200,
         create_response: false,
-        interrupt_response: true,
       },
     };
   }
@@ -1388,18 +1552,14 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   // Start Volcengine Big-Model ASR
   connectVolcAsr();
 
-  // Keepalive: 100ms silence at 24kHz (24000 * 0.1 * 2 bytes = 4800 bytes)
+  // Keepalive via WebSocket ping
   let lastAudioSentToOai = Date.now();
-  const SILENCE_100MS_24K = Buffer.alloc(4800).toString("base64");
   const keepaliveTimer = setInterval(() => {
     if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
-    if ((Date.now() - lastAudioSentToOai) > 4_000) {
-      oaiWs.send(JSON.stringify({
-        type: "input_audio_buffer.append",
-        audio: SILENCE_100MS_24K,
-      }));
+    if ((Date.now() - lastAudioSentToOai) > 10_000) {
+      try { oaiWs.ping(); } catch {}
     }
-  }, 5_000);
+  }, 10_000);
 
   // Liveness check
   const LIVENESS_TIMEOUT_MS = 120_000;
@@ -1465,8 +1625,39 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           }
 
           case "conversation.item.input_audio_transcription.completed": {
-            if (!openAiTranscriptionEnabled || speechTranscriptCommitted) break;
-            handleWhisperCompletedTranscript(msg.transcript || "");
+            if (!openAiTranscriptionEnabled) break;
+            const transcript = (msg.transcript || "").trim();
+            if (!transcript) break;
+
+            if (isWhisperHallucination(transcript, ctx.language)) {
+              log.debug(`Whisper hallucination dropped: ${JSON.stringify(transcript)}`);
+              inputTranscriptBuffer = "";
+              break;
+            }
+
+            // If user transcript was committed recently (e.g. early flush before ASR completed),
+            // update it with the true completed transcript only if it is a genuine continuation
+            // of the same speech, NOT an overwrite with a completely different sentence!
+            if (speechTranscriptCommitted) {
+              const now = Date.now();
+              const isContinuation =
+                transcript.length > lastCommittedUserTranscript.length &&
+                transcript.toLowerCase().startsWith(lastCommittedUserTranscript.toLowerCase().slice(0, 10));
+              if (
+                !isWhisperHallucination(transcript, ctx.language) &&
+                isContinuation &&
+                now - lastCommittedUserTranscriptAt < 10_000
+              ) {
+                log.info(`Updating recent committed user transcript (${JSON.stringify(lastCommittedUserTranscript)}) with expanded ASR: ${JSON.stringify(transcript)}`);
+                lastCommittedUserTranscript = transcript;
+                lastCommittedUserTranscriptAt = now;
+                send({ type: "asr_ended", text: transcript });
+                updateLastUserHistory(transcript);
+              }
+              break;
+            }
+
+            handleWhisperCompletedTranscript(transcript);
             break;
           }
 
@@ -1485,6 +1676,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               const int16Buf = Buffer.from(msg.delta, "base64");
               const float32Buf = int16ToFloat32(int16Buf);
               responseTtsBytes += float32Buf.length;
+              const chunkMs = Math.round((float32Buf.length / 96000) * 1000);
+              ttsPlaybackEndsAt = Math.max(Date.now(), ttsPlaybackEndsAt) + chunkMs;
               sendBinary(float32Buf);
             } else if (isTransitioning && msg.delta) {
               log.warn("Audio suppressed: isTransitioning=true");
@@ -1573,6 +1766,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
                 currentQuestionIndex = newIdx;
                 questionEnteredAt = Date.now();
                 userCommittedWordsThisQuestion = 0;
+                userSpokeThisTurn = false;
+                nudgeSentThisTurn = false;
+                clearSilenceGapTimer();
                 disableTools();
                 send({
                   type: "question_change",
@@ -1637,6 +1833,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             }
 
             if (hadTts && responseTtsBytes > 0) {
+              ttsPlaybackEndsAt = Math.max(ttsPlaybackEndsAt, Date.now() + 500);
               // Flush any pending user text BEFORE committing agent text
               // so the transcript order matches the conversation order.
               flushPendingUserTurnBeforeAssistant();
@@ -1648,6 +1845,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
                 pushHistory("assistant", capturedModelText);
               }
               send({ type: "tts_ended" });
+              userSpokeThisTurn = false;
+              startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
             } else if (hadTts) {
               log.info(`TTS interrupted before audio (0B): ${JSON.stringify(capturedModelText)}`);
               pendingTtsText = [];
@@ -1754,7 +1953,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
   async function connectOai(): Promise<WebSocket> {
     const ws = new WebSocket(OPENAI_WS_URL, {
-      headers: { "api-key": AZURE_API_KEY },
+      headers: OPENAI_WS_HEADERS,
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -1774,6 +1973,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             ws.removeListener("message", h);
             log.info("Session created — default config keys:", Object.keys(msg.session || {}));
             resolve();
+          } else if (msg.type === "error") {
+            clearTimeout(t);
+            ws.removeListener("message", h);
+            log.error("OpenAI session.create error:", msg.error);
+            reject(new Error(msg.error?.message || "Session create error"));
           }
         } catch { /* ignore */ }
       };
@@ -1814,7 +2018,10 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             log.info("Session updated — transcription:", JSON.stringify(audioIn.transcription), "turn_detection:", audioIn.turn_detection?.type, "noise_reduction:", JSON.stringify(audioIn.noise_reduction));
             resolve();
           } else if (msg.type === "error") {
+            clearTimeout(t);
+            ws.removeListener("message", h);
             log.error("Session update error:", JSON.stringify(msg.error));
+            reject(new Error(msg.error?.message || "Session update error"));
           }
         } catch { /* ignore */ }
       };
@@ -1862,7 +2069,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               item: {
                 type: "message",
                 role: h.role,
-                content: [{ type: "input_text", text: h.text }],
+                content: [{ type: h.role === "assistant" ? "output_text" : "input_text", text: h.text }],
               },
             }));
           }
@@ -1920,20 +2127,23 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     // Give the browser time to set up its AudioContext before streaming audio
     await new Promise((r) => setTimeout(r, 1_500));
 
-    // Trigger initial greeting
-    const greeting = currentQuestionIndex > 0
-      ? `The participant is returning to the interview. Continue from question ${currentQuestionIndex + 1}.`
-      : "The participant has just joined. Please greet them and begin with question 1.";
-
-    oaiWs.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "system",
-        content: [{ type: "input_text", text: `[SYSTEM] ${greeting}` }],
-      },
-    }));
-    requestAssistantResponse("initial greeting", { tool_choice: "none" });
+    // Trigger initial greeting ONLY on the very first question when starting fresh.
+    // If reconnecting/resuming on an existing question, wait silently for candidate speech.
+    if (currentQuestionIndex === 0) {
+      const greeting = "The participant has just joined. Please greet them warmly and begin with question 1.";
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: `[SYSTEM] ${greeting}` }],
+        },
+      }));
+      requestAssistantResponse("initial greeting", { tool_choice: "none" });
+    } else {
+      log.info(`Resuming on Q${currentQuestionIndex + 1} — waiting silently for participant speech`);
+      startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
+    }
   } catch (err) {
     log.error("Failed to connect to OpenAI:", err);
     send({
@@ -1953,6 +2163,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   ) {
     clearPendingTransition();
     clearQuestionPrompt();
+    clearSilenceGapTimer();
     cancelOngoingResponse();
 
     isTransitioning = true;
@@ -1982,6 +2193,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       currentQuestionIndex = targetIdx;
       questionEnteredAt = Date.now();
       userCommittedWordsThisQuestion = 0;
+      userSpokeThisTurn = false;
+      nudgeSentThisTurn = false;
+      clearSilenceGapTimer();
       disableTools();
       pushHistory("user", `[Moved to question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}"]`);
       send({
@@ -2051,27 +2265,19 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
       if (msg.type === "audio" && msg.data) {
         if (isTransitioning) return;
-        const pcm16k = Buffer.from(msg.data, "hex");
+        const rawPcm = Buffer.from(msg.data, "hex");
+        const is24k = msg.sampleRate === 24000;
+        const pcm24k = is24k ? rawPcm : resample16to24(rawPcm);
         const nowMs = Date.now();
 
-        const samples = new Int16Array(pcm16k.buffer, pcm16k.byteOffset, pcm16k.length / 2);
+        const samples = new Int16Array(rawPcm.buffer, rawPcm.byteOffset, rawPcm.length / 2);
         let sumSq = 0;
         for (let i = 0; i < samples.length; i++) sumSq += samples[i] * samples[i];
         const rms = Math.sqrt(sumSq / (samples.length || 1));
-        const aboveNoiseFloor = rms >= MIN_AUDIO_RMS;
-        const withinSpeechStopGrace = nowMs < speechStopForwardGraceUntil;
-        const looksLikeContinuationSpeech = rms >= CONTINUATION_AUDIO_RMS;
-
-        // Gate: before VAD detects speech, only forward loud-enough audio
-        // to prevent ambient noise from triggering the VAD. Once speech is
-        // active, always forward (including silence) so the VAD can detect
-        // when speech ends.
-        if (!vadSpeechActive && !aboveNoiseFloor) {
-          if (!withinSpeechStopGrace || !looksLikeContinuationSpeech) return;
-        }
 
         lastUserInput = nowMs;
-        const inEchoCooldown = (nowMs - lastTtsAudioTime) < TTS_ECHO_COOLDOWN_MS;
+        const inEchoCooldown = (nowMs - lastTtsAudioTime) < TTS_ECHO_COOLDOWN_MS || nowMs < ttsPlaybackEndsAt;
+
         const bargeInFrameEligible =
           inEchoCooldown &&
           modelIsSpeaking &&
@@ -2105,16 +2311,58 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           send({ type: "interrupt" });
         }
 
-        if (!inEchoCooldown || allowBargeInDuringTts) {
+        const canForwardAudio = !inEchoCooldown || allowBargeInDuringTts;
+
+        if (!userSpeechGateOpen) {
+          if (rms >= VOICE_ATTACK_RMS && canForwardAudio) {
+            voiceAttackFrames += 1;
+            if (voiceAttackFrames >= VOICE_ATTACK_FRAME_COUNT) {
+              userSpeechGateOpen = true;
+              lastVoiceEnergyTime = nowMs;
+              clearSilenceGapTimer();
+
+              // Flush pre-roll buffer so the beginning phonemes are never clipped
+              if (audioPreRoll.length > 0) {
+                for (const chunk of audioPreRoll) {
+                  oaiWs.send(JSON.stringify({
+                    type: "input_audio_buffer.append",
+                    audio: chunk.toString("base64"),
+                  }));
+                }
+                audioPreRoll = [];
+              }
+            }
+          } else {
+            voiceAttackFrames = 0;
+            if (canForwardAudio) {
+              audioPreRoll.push(pcm24k);
+              if (audioPreRoll.length > MAX_PRE_ROLL_CHUNKS) {
+                audioPreRoll.shift();
+              }
+            } else {
+              audioPreRoll = [];
+            }
+          }
+        } else {
+          if (rms >= VOICE_SUSTAIN_RMS) {
+            lastVoiceEnergyTime = nowMs;
+          } else if (nowMs - lastVoiceEnergyTime >= VOICE_HANGOVER_MS) {
+            userSpeechGateOpen = false;
+            voiceAttackFrames = 0;
+            audioPreRoll = [];
+          }
+        }
+        const hasRecentVoiceEnergy = userSpeechGateOpen;
+
+        if (canForwardAudio && hasRecentVoiceEnergy) {
           lastAudioSentToOai = Date.now();
-          const pcm24k = resample16to24(pcm16k);
           oaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
             audio: pcm24k.toString("base64"),
           }));
         }
-        if ((!inEchoCooldown || allowBargeInDuringTts) && aboveNoiseFloor) {
-          sendAudioToVolc(pcm16k);
+        if (canForwardAudio && rms >= MIN_AUDIO_RMS) {
+          sendAudioToVolc(rawPcm);
         }
         } else if (msg.type === "text_input" && msg.content) {
           const text = (msg.content as string).trim();
@@ -2212,6 +2460,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     clearInterval(livenessTimer);
     clearPendingTransition();
     clearQuestionPrompt();
+    clearSilenceGapTimer();
     cleanupVolcAsr();
     if (pendingInputFlush) clearTimeout(pendingInputFlush);
     if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);

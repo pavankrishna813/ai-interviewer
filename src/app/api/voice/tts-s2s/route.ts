@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
+import OpenAI from "openai";
 import { createLogger } from "@/lib/logger";
 
 const log = createLogger("api/voice/tts-s2s");
@@ -52,9 +53,39 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing text" }, { status: 400 });
   }
 
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const speechRes = await openai.audio.speech.create({
+        model: "tts-1",
+        voice: (process.env.OPENAI_VOICE as "alloy" | "ash" | "coral" | "echo" | "fable" | "onyx" | "nova" | "sage" | "shimmer") || "alloy",
+        input: text,
+        response_format: "pcm",
+      });
+
+      const arrayBuffer = await speechRes.arrayBuffer();
+      const int16 = new Int16Array(arrayBuffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      return new Response(Buffer.from(float32.buffer), {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(float32.byteLength),
+          "Cache-Control": "no-cache",
+        },
+      });
+    } catch (err) {
+      log.error("OpenAI TTS error in tts-s2s:", err);
+      // Fall through to Doubao if configured
+    }
+  }
+
   if (!APP_ID || !ACCESS_TOKEN) {
     return NextResponse.json(
-      { error: "Doubao credentials not configured" },
+      { error: "Voice credentials not configured" },
       { status: 500 }
     );
   }

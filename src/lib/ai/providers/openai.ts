@@ -5,8 +5,19 @@ import { type LLMProvider, type GenerationParams, type LLMResponse, type LLMMess
 export class OpenAIProvider implements LLMProvider {
   id = "openai";
   name = "OpenAI";
-  models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo", "o3-mini"];
-  defaultModel = "gpt-4o-mini";
+  models = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
+    "o3-mini",
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+  ];
+  defaultModel = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
   private client: OpenAI;
 

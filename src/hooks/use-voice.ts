@@ -13,6 +13,7 @@ import {
   PLAYBACK_SAMPLE_RATE,
   shouldFlushPlaybackQueue,
 } from "@/lib/voice/playback-jitter-buffer";
+import { isWhisperHallucination } from "@/lib/voice/hallucination-filter";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const log = createLogger("voice");
@@ -84,6 +85,28 @@ interface TrackedMessage {
  * 7. Per-question transitions managed by relay with LLM summarization
  * 8. On disconnect, all messages are saved to database
  */
+function downsampleTo24k(inputData: Float32Array, inputSampleRate: number): Int16Array {
+  if (inputSampleRate === 24000) {
+    const pcm = new Int16Array(inputData.length);
+    for (let i = 0; i < inputData.length; i++) {
+      pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+    }
+    return pcm;
+  }
+  const ratio = inputSampleRate / 24000;
+  const newLength = Math.max(1, Math.round(inputData.length / ratio));
+  const result = new Int16Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const srcIdx = i * ratio;
+    const idx0 = Math.floor(srcIdx);
+    const idx1 = Math.min(idx0 + 1, inputData.length - 1);
+    const frac = srcIdx - idx0;
+    const sample = inputData[idx0] * (1 - frac) + (inputData[idx1] ?? inputData[idx0]) * frac;
+    result[i] = Math.max(-32768, Math.min(32767, sample * 32768));
+  }
+  return result;
+}
+
 export function useVoice({
   sessionId,
   interviewContext,
@@ -129,8 +152,9 @@ export function useVoice({
   const micHoldUntilRef = useRef(0);
   const bargeInFramesRef = useRef(0);
 
-  const BARGE_IN_RMS_THRESHOLD = 0.02;
-  const BARGE_IN_FRAME_COUNT = 2;
+  const BARGE_IN_RMS_THRESHOLD = 0.08;
+  const BARGE_IN_FRAME_COUNT = 4;
+  const lastSpokenTimeRef = useRef(0);
 
   const onInterruptRef = useRef(onInterrupt);
   useEffect(() => { onInterruptRef.current = onInterrupt; }, [onInterrupt]);
@@ -491,12 +515,12 @@ export function useVoice({
           break;
 
         case "asr": {
-          // ASR transcript chunk from Volcengine — accumulate.
+          // ASR transcript chunk from Volcengine / Whisper — accumulate.
           const results =
             (msg.data?.results as Array<Record<string, unknown>>) || [];
           if (results.length > 0) {
             const text = (results[0].text as string) || "";
-            if (text.trim()) {
+            if (text.trim() && !isWhisperHallucination(text, interviewContext.language)) {
               asrBufferRef.current = text.trim();
               setState((s) => ({ ...s, userTranscript: text }));
               onTranscript?.(text, false);
@@ -508,7 +532,7 @@ export function useVoice({
         case "asr_ended": {
           const finalText =
             (typeof msg.text === "string" && msg.text.trim()) || asrBufferRef.current;
-          if (finalText) {
+          if (finalText && !isWhisperHallucination(finalText, interviewContext.language)) {
             const normalized = finalText.replace(/\s+/g, " ").trim().toLowerCase();
             const lastFinal = lastFinalUserTranscriptRef.current;
             const isDuplicateFinal =
@@ -711,6 +735,9 @@ export function useVoice({
     [interruptPlayback, extractText, onTranscript, onAIResponse, onError, onQuestionChange, saveProgress]
   );
 
+  const clientSpeechFramesRef = useRef(0);
+  const clientPreRollRef = useRef<string[]>([]);
+
   /** Start capturing microphone audio and sending to relay */
   const startListening = useCallback(async () => {
     if (isListeningRef.current) return;
@@ -718,7 +745,6 @@ export function useVoice({
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 16000,
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
@@ -727,12 +753,19 @@ export function useVoice({
       });
       mediaStreamRef.current = stream;
 
-      const ctx = new AudioContext({ sampleRate: 16000 });
+      const ctx = new AudioContext();
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+      const actualSampleRate = ctx.sampleRate;
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
 
+      const silentGain = ctx.createGain();
+      silentGain.gain.value = 0;
       source.connect(processor);
-      processor.connect(ctx.destination);
+      processor.connect(silentGain);
+      silentGain.connect(ctx.destination);
 
       processor.onaudioprocess = (event) => {
         if (!isListeningRef.current) return;
@@ -747,6 +780,16 @@ export function useVoice({
         const rms = Math.sqrt(sumSq / inputData.length);
         const level = Math.min(1, rms * 5);
         setState((s) => ({ ...s, audioLevel: level }));
+
+        // Resample from actual hardware rate to 24000 Hz int16 PCM
+        const pcm24 = downsampleTo24k(inputData, actualSampleRate);
+
+        // Send as hex-encoded string
+        const bytes = new Uint8Array(pcm24.buffer);
+        let hex = "";
+        for (let i = 0; i < bytes.length; i++) {
+          hex += bytes[i].toString(16).padStart(2, "0");
+        }
 
         if (performance.now() < micHoldUntilRef.current) {
           if (rms < BARGE_IN_RMS_THRESHOLD) {
@@ -763,22 +806,37 @@ export function useVoice({
           micHoldUntilRef.current = 0;
         } else {
           bargeInFramesRef.current = 0;
+
+          // Silence suppression: do not stream ambient room noise when user is not speaking
+          const CLIENT_VAD_THRESHOLD = 0.012;
+          if (rms >= CLIENT_VAD_THRESHOLD) {
+            clientSpeechFramesRef.current += 1;
+            if (clientSpeechFramesRef.current >= 2) {
+              lastSpokenTimeRef.current = performance.now();
+            }
+          } else {
+            clientSpeechFramesRef.current = 0;
+          }
+          const hasRecentSpeech = performance.now() - lastSpokenTimeRef.current < 600;
+          if (!hasRecentSpeech) {
+            // Keep rolling pre-roll audio so the start of words is never clipped
+            clientPreRollRef.current.push(hex);
+            if (clientPreRollRef.current.length > 4) {
+              clientPreRollRef.current.shift();
+            }
+            return;
+          }
         }
 
-        // Convert float32 to int16 PCM
-        const pcm = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+        // Flush pre-roll buffer so beginning syllables (e.g. "Can you hear me") are never cut off
+        if (clientPreRollRef.current.length > 0) {
+          for (const preHex of clientPreRollRef.current) {
+            connector.sendJson({ type: "audio", data: preHex, sampleRate: 24000 });
+          }
+          clientPreRollRef.current = [];
         }
 
-        // Send as hex-encoded string
-        const bytes = new Uint8Array(pcm.buffer);
-        let hex = "";
-        for (let i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, "0");
-        }
-
-        connector.sendJson({ type: "audio", data: hex });
+        connector.sendJson({ type: "audio", data: hex, sampleRate: 24000 });
       };
 
       processorRef.current = { processor, source, ctx };
@@ -789,7 +847,7 @@ export function useVoice({
         error instanceof Error ? error.message : "Microphone access failed";
       onError?.(msg);
     }
-  }, [onError]);
+  }, [onError, onTranscript, interviewContext.language]);
 
   /** Stop capturing microphone */
   const stopListening = useCallback(() => {

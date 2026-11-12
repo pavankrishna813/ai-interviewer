@@ -33,6 +33,7 @@ import {
     AlertCircle,
     AudioLines,
     Camera,
+    Check,
     CheckCircle2,
     Loader2,
     Mic,
@@ -500,19 +501,54 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
     getSpeechSynthesisApi()?.cancel();
   }, [getSpeechSynthesisApi]);
 
-  const startListening = useCallback((quiet = false) => {
-    if (!quiet) {
-      setPhase("listening");
-      setTranscript("");
-    }
+  const startListening = useCallback(() => {
+    setPhase("listening");
+    setTranscript("");
 
     let lastAsrText = "";
     let handled = false;
     let micStarted = false;
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let browserRecognition: any = null;
+    if (typeof window !== "undefined") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognitionClass) {
+        try {
+          browserRecognition = new SpeechRecognitionClass();
+          browserRecognition.continuous = false;
+          browserRecognition.interimResults = true;
+          browserRecognition.lang = languageRef.current || "en-US";
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          browserRecognition.onresult = (event: any) => {
+            if (handled) return;
+            let current = "";
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              current += event.results[i][0].transcript;
+            }
+            if (current.trim()) {
+              lastAsrText = current.trim();
+              setTranscript(lastAsrText);
+            }
+          };
+          browserRecognition.onend = () => {
+            if (!handled && lastAsrText.trim()) {
+              finish(lastAsrText);
+            }
+          };
+          browserRecognition.onerror = () => {};
+          browserRecognition.start();
+        } catch {}
+      }
+    }
+
     const finish = (text: string) => {
       if (handled) return;
       handled = true;
+      if (browserRecognition) {
+        try { browserRecognition.stop(); } catch {}
+      }
       stopTtsPlayback();
       if (micCtxRef.current) {
         micCtxRef.current.close().catch(() => {});
@@ -526,7 +562,7 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
       relayConnectorRef.current = null;
       if (text.trim()) {
         analyzeResponse(text);
-      } else if (!quiet) {
+      } else {
         analyzeResponse("");
       }
     };
@@ -644,13 +680,17 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
         }
       },
       onPermanentFailure: () => {
-        if (!handled) finish(lastAsrText);
+        if (!handled && lastAsrText.trim()) {
+          finish(lastAsrText);
+        }
       },
     });
 
     relayConnectorRef.current = connector;
     void connector.connect().catch(() => {
-      if (!handled) finish(lastAsrText);
+      if (!handled && lastAsrText.trim()) {
+        finish(lastAsrText);
+      }
     });
 
     setTimeout(() => {
@@ -671,7 +711,6 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
       return;
     }
 
-    startListening(true);
     setPhase("playing");
 
     const msg = getMicTestMessage(language);
@@ -691,6 +730,9 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
       if (res.ok && res.body) {
         const ctx = new AudioContext({ sampleRate: 24000 });
         audioCtxRef.current = ctx;
+        if (ctx.state === "suspended") {
+          await ctx.resume();
+        }
         const reader = res.body.getReader();
         let playTime = ctx.currentTime;
         let leftover: Uint8Array | null = null;
@@ -745,15 +787,11 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
         ctx.close().catch(() => {});
         audioCtxRef.current = null;
         abortRef.current = null;
-        if (relayConnectorRef.current?.isReady) {
-          setPhase("listening");
-        } else {
-          startListening();
-        }
+        startListening();
         return;
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (err instanceof DOMException && err.name === "AbortError" && abortRef.current === null) return;
       // S2S unavailable, fall back to browser SpeechSynthesis
     }
 
@@ -858,10 +896,24 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
             </Button>
           )}
           {phase === "listening" && (
-            <Button size="sm" variant="outline" disabled className="w-full">
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              Listening...
-            </Button>
+            <div className="flex flex-col gap-1.5 w-full">
+              <Button size="sm" variant="outline" disabled className="w-full">
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                Listening... (Say &quot;Yes&quot;)
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  stopAll();
+                  onDoneRef.current();
+                }}
+                className="w-full text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Check className="mr-1 h-3.5 w-3.5" />
+                Heard audio? Confirm
+              </Button>
+            </div>
           )}
           {phase === "analyzing" && (
             <Button size="sm" disabled className="w-full">
@@ -870,10 +922,23 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
             </Button>
           )}
           {phase === "confirm" && !done && (
-            <Button size="sm" onClick={playTTS} className="w-full">
-              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              Play again
-            </Button>
+            <div className="flex flex-col gap-1.5 w-full">
+              <Button
+                size="sm"
+                onClick={() => {
+                  stopAll();
+                  onDoneRef.current();
+                }}
+                className="w-full"
+              >
+                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                Audio confirmed
+              </Button>
+              <Button size="sm" variant="outline" onClick={playTTS} className="w-full">
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Play again
+              </Button>
+            </div>
           )}
         </div>
 

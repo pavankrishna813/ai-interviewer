@@ -1,6 +1,8 @@
 export const DEFAULT_TTS_BARGE_IN_MIN_AUDIO_MS = 400;
 export const DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES = 32_000;
 
+export { isWhisperHallucination } from "../src/lib/voice/hallucination-filter";
+
 export interface TtsBargeInDecision {
   inEchoCooldown: boolean;
   modelIsSpeaking: boolean;
