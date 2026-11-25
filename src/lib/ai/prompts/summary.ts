@@ -56,14 +56,14 @@ export function buildSummaryPrompt(
 
   const criteriaEvalInstruction =
     assessmentCriteria && assessmentCriteria.length > 0
-      ? `7. Evaluate the participant against EACH assessment criterion with a score (1-10) and reasoning\n`
+      ? `7. Evaluate the participant against EACH assessment criterion with a score (0-10) and reasoning strictly supported by direct evidence from the transcript. If a criterion was not addressed or demonstrated, score it 0 with explanation.\n`
       : "";
 
   const criteriaJsonField =
     assessmentCriteria && assessmentCriteria.length > 0
       ? `,
   "criteriaEvaluations": [
-    { "name": "criterion name", "score": 1-10, "reasoning": "brief explanation of the score" }
+    { "name": "criterion name", "score": 0, "reasoning": "explanation strictly grounded in candidate statements" }
   ]`
       : "";
 
@@ -94,7 +94,23 @@ export function buildSummaryPrompt(
   // ── Per-question evaluation section ────────────────────────────
   const questionEvalInstruction =
     questions && questions.length > 0
-      ? `6. For EACH interview question, evaluate the participant's response: how well they addressed the question, key strengths, areas for improvement, and a score (1-10)\n`
+      ? `6. For EACH interview question, evaluate the participant's response strictly grounded in the transcript:
+   - Extract candidate's direct statements or specific evidence into "evidence".
+   - IF the candidate did NOT answer the question, skipped it, stayed silent, or the topic was never discussed, you MUST set:
+     "score": 0,
+     "status": "NO_RESPONSE",
+     "evidence": "No response provided",
+     "evaluation": "The participant did not provide an answer for this question.",
+     "highlights": [],
+     "improvements": ["Question was skipped or unanswered."]
+   - NEVER invent, assume, or hallucinate candidate experience or answers that are not explicitly present in the transcript.
+   - For answered questions, score on an objective 0-10 scale based strictly on factual accuracy and depth:
+     * 0: No attempt / silent / off-topic deflection.
+     * 1-3: Poor / Superficial: Vague buzzwords, incorrect technical claims, or evasive.
+     * 4-5: Below Average: Basic/partial answer, missing core mechanisms.
+     * 6-7: Competent: Correct core explanation, understands concepts, but missing depth or trade-offs.
+     * 8-9: Strong: High technical accuracy, structured explanation, discusses trade-offs/edge cases.
+     * 10: Exceptional: Deep architectural insight, edge case anticipation, industry best practices.\n`
       : "";
 
   const questionEvalJsonField =
@@ -104,9 +120,11 @@ export function buildSummaryPrompt(
     {
       "question": "the interview question text",
       "score": 8,
-      "evaluation": "detailed evaluation of the participant's response to this question",
-      "highlights": ["specific strength or notable point"],
-      "improvements": ["area where the response could be improved"]
+      "status": "ANSWERED",
+      "evidence": "verbatim quote or concrete points stated by the participant",
+      "evaluation": "detailed evaluation strictly grounded in the participant's evidence",
+      "highlights": ["specific strength or notable point from actual response"],
+      "improvements": ["concrete area where the response could be improved"]
     }
   ]`
       : "";
@@ -125,7 +143,13 @@ export function buildSummaryPrompt(
     ? "\n- The participant wrote code snippets during the interview. Evaluate the code quality, correctness, readability, and problem-solving approach. Consider whether the code demonstrates strong algorithmic thinking, proper use of data structures, good coding practices, and effective handling of edge cases. Incorporate your code evaluation into the report."
     : "";
 
-  const systemPrompt = `You are an expert interview analyst. Evaluate and summarize the following interview transcript. Focus on the participant's responses — their depth, relevance, and quality.
+  const systemPrompt = `You are an expert interview analyst and technical evaluator. Evaluate and summarize the following interview transcript. Focus ONLY on what the participant actually said — their depth, relevance, factual accuracy, and demonstrated skills.
+
+CRITICAL INTEGRITY & ANTI-HALLUCINATION DIRECTIVES:
+- Base all evaluations strictly on verifiable evidence in the transcript.
+- If the participant did not speak, stayed silent, or did not answer specific questions, assign a score of 0 for those questions and set status to "NO_RESPONSE".
+- NEVER hallucinate, extrapolate, or invent candidate experience, projects, tools, or answers that do not exist in the transcript text.
+- Do NOT inflate scores: evaluate objectively without defaulting to 7-9 for weak or generic responses.
 
 Interview: "${interviewTitle}"${objectiveSection}${criteriaSection}${questionsSection}${whiteboardSection}${codeSection}
 
@@ -133,8 +157,8 @@ Transcript:
 ${transcript}
 
 Your analysis should:
-1. Summarize the key points from the participant's answers
-2. Evaluate how well the participant addressed each topic
+1. Summarize the key points from the participant's actual answers
+2. Evaluate how well the participant addressed each topic based strictly on evidence
 3. Identify recurring themes and notable insights
 4. Assess the overall sentiment and engagement level
 5. Highlight any particularly strong or weak responses${whiteboardInstruction}${codeInstruction}

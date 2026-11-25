@@ -19,6 +19,7 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -70,6 +71,9 @@ import {
     UserCheck,
     UserPlus,
     Users,
+    Video,
+    Mic,
+    MoreHorizontal,
     X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -215,6 +219,7 @@ const COLUMNS: ColumnDef[] = [
   },
   { key: "source", label: "Source", sortKey: "source", defaultVisible: true },
   { key: "status", label: "Status", sortKey: "status", defaultVisible: true },
+  { key: "recording", label: "Recording", defaultVisible: true },
 ];
 
 const DEFAULT_VISIBLE = new Set(
@@ -418,6 +423,12 @@ export function CandidateManager({
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState<{
+    type: "session" | "candidate" | "both";
+    sessionId?: string;
+    candidateId?: string;
+    name: string;
+  } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [resumeImportOpen, setResumeImportOpen] = useState(false);
@@ -536,6 +547,7 @@ export function CandidateManager({
 
   const invalidateAll = useCallback(() => {
     utils.candidate.list.invalidate({ interviewId });
+    utils.session.listByInterview.invalidate({ interviewId });
     utils.analysis.getInterviewInsights.invalidate({ interviewId });
   }, [utils, interviewId]);
 
@@ -681,14 +693,24 @@ export function CandidateManager({
 
   const isBulkDeleting =
     removeCandidatesMutation.isLoading || removeSessionsMutation.isLoading;
+  const isSingleDeleting =
+    removeCandidatesMutation.isLoading || removeSessionsMutation.isLoading;
 
   const handleBulkDelete = useCallback(() => {
     const candidateIds = Array.from(selectedIds)
       .filter((id) => id.startsWith("candidate-"))
       .map((id) => id.replace("candidate-", ""));
-    const sessionIds = Array.from(selectedIds)
+    const walkinSessionIds = Array.from(selectedIds)
       .filter((id) => id.startsWith("walkin-"))
       .map((id) => id.replace("walkin-", ""));
+
+    const candidateSessionIds = (candidateList.data?.candidates ?? [])
+      .filter((c: any) => candidateIds.includes(c.id) && c.session?.id)
+      .map((c: any) => c.session.id as string);
+
+    const allSessionIds = Array.from(
+      new Set([...walkinSessionIds, ...candidateSessionIds]),
+    );
 
     let pending = 0;
     const onDone = () => {
@@ -698,21 +720,116 @@ export function CandidateManager({
           title: `${selectedIds.size} entry${selectedIds.size > 1 ? "s" : ""} removed`,
         });
         setSelectedIds(new Set());
+        invalidateAll();
       }
     };
 
-    if (candidateIds.length > 0) {
+    if (allSessionIds.length > 0) {
+      pending++;
+      removeSessionsMutation.mutate(
+        { ids: allSessionIds },
+        {
+          onSuccess: () => {
+            if (candidateIds.length > 0) {
+              pending++;
+              removeCandidatesMutation.mutate(
+                { ids: candidateIds },
+                { onSuccess: onDone },
+              );
+            }
+            onDone();
+          },
+        },
+      );
+    } else if (candidateIds.length > 0) {
       pending++;
       removeCandidatesMutation.mutate(
         { ids: candidateIds },
         { onSuccess: onDone },
       );
     }
-    if (sessionIds.length > 0) {
-      pending++;
-      removeSessionsMutation.mutate({ ids: sessionIds }, { onSuccess: onDone });
+  }, [
+    selectedIds,
+    candidateList.data?.candidates,
+    removeCandidatesMutation,
+    removeSessionsMutation,
+    invalidateAll,
+    toast,
+  ]);
+
+  const handleConfirmSingleDelete = useCallback(() => {
+    if (!itemToDelete) return;
+    const { type, sessionId, candidateId, name } = itemToDelete;
+
+    if (type === "session" && sessionId) {
+      removeSessionsMutation.mutate(
+        { ids: [sessionId] },
+        {
+          onSuccess: () => {
+            toast({ title: `Session for ${name} deleted successfully` });
+            setItemToDelete(null);
+            invalidateAll();
+          },
+        },
+      );
+    } else if (type === "candidate" && candidateId) {
+      removeCandidatesMutation.mutate(
+        { ids: [candidateId] },
+        {
+          onSuccess: () => {
+            toast({ title: `Candidate ${name} deleted successfully` });
+            setItemToDelete(null);
+            invalidateAll();
+          },
+        },
+      );
+    } else if (type === "both") {
+      if (sessionId) {
+        removeSessionsMutation.mutate(
+          { ids: [sessionId] },
+          {
+            onSuccess: () => {
+              if (candidateId) {
+                removeCandidatesMutation.mutate(
+                  { ids: [candidateId] },
+                  {
+                    onSuccess: () => {
+                      toast({
+                        title: `Candidate and session for ${name} deleted successfully`,
+                      });
+                      setItemToDelete(null);
+                      invalidateAll();
+                    },
+                  },
+                );
+              } else {
+                toast({ title: `Session for ${name} deleted successfully` });
+                setItemToDelete(null);
+                invalidateAll();
+              }
+            },
+          },
+        );
+      } else if (candidateId) {
+        removeCandidatesMutation.mutate(
+          { ids: [candidateId] },
+          {
+            onSuccess: () => {
+              toast({ title: `Candidate ${name} deleted successfully` });
+              setItemToDelete(null);
+              invalidateAll();
+            },
+          },
+        );
+      }
     }
-  }, [selectedIds, removeCandidatesMutation, removeSessionsMutation, toast]);
+  }, [
+    itemToDelete,
+    removeSessionsMutation,
+    removeCandidatesMutation,
+    invalidateAll,
+    toast,
+  ]);
 
   // Clear selection when data changes
   useEffect(() => {
@@ -1034,55 +1151,57 @@ export function CandidateManager({
                         ),
                       )}
                     {/* Frozen right: gear icon */}
-                    <TableHead className="sticky right-0 z-20 w-10 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]">
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                          >
-                            <Settings className="h-4 w-4 text-muted-foreground" />
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent align="end" className="w-48 p-1">
-                          <div className="max-h-[320px] overflow-y-auto code-scrollbar">
-                            {orderedColumns
-                              .filter((col) => !col.alwaysVisible)
-                              .map((col) => (
-                                <div
-                                  key={col.key}
-                                  data-col-key={col.key}
-                                  className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors ${
-                                    draggingCol === col.key
-                                      ? "bg-accent/80 opacity-50"
-                                      : dragOverCol === col.key
-                                        ? "border-t-2 border-primary bg-primary/5"
-                                        : "hover:bg-accent"
-                                  }`}
-                                >
-                                  <GripVertical
-                                    className="h-3.5 w-3.5 shrink-0 cursor-grab touch-none text-muted-foreground/50 active:cursor-grabbing"
-                                    onPointerDown={(e) =>
-                                      handleGripPointerDown(col.key, e)
-                                    }
-                                  />
-                                  <span
-                                    className="flex-1 cursor-pointer select-none text-left"
-                                    onClick={() => {
-                                      if (!draggingCol) toggleColumn(col.key);
-                                    }}
+                    <TableHead className="sticky right-0 z-20 w-24 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]">
+                      <div className="flex items-center justify-end">
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                            >
+                              <Settings className="h-4 w-4 text-muted-foreground" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent align="end" className="w-48 p-1">
+                            <div className="max-h-[320px] overflow-y-auto code-scrollbar">
+                              {orderedColumns
+                                .filter((col) => !col.alwaysVisible)
+                                .map((col) => (
+                                  <div
+                                    key={col.key}
+                                    data-col-key={col.key}
+                                    className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors ${
+                                      draggingCol === col.key
+                                        ? "bg-accent/80 opacity-50"
+                                        : dragOverCol === col.key
+                                          ? "border-t-2 border-primary bg-primary/5"
+                                          : "hover:bg-accent"
+                                    }`}
                                   >
-                                    {col.label}
-                                  </span>
-                                  {visibleColumns.has(col.key) && (
-                                    <Check className="h-4 w-4 shrink-0 text-primary" />
-                                  )}
-                                </div>
-                              ))}
-                          </div>
-                        </PopoverContent>
-                      </Popover>
+                                    <GripVertical
+                                      className="h-3.5 w-3.5 shrink-0 cursor-grab touch-none text-muted-foreground/50 active:cursor-grabbing"
+                                      onPointerDown={(e) =>
+                                        handleGripPointerDown(col.key, e)
+                                      }
+                                    />
+                                    <span
+                                      className="flex-1 cursor-pointer select-none text-left"
+                                      onClick={() => {
+                                        if (!draggingCol) toggleColumn(col.key);
+                                      }}
+                                    >
+                                      {col.label}
+                                    </span>
+                                    {visibleColumns.has(col.key) && (
+                                      <Check className="h-4 w-4 shrink-0 text-primary" />
+                                    )}
+                                  </div>
+                                ))}
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
                     </TableHead>
                   </TableRow>
                 </TableHeader>
@@ -1212,6 +1331,44 @@ export function CandidateManager({
                             : status.replace("_", " ")}
                         </Badge>
                       ),
+                      recording: (() => {
+                        const videoUrl =
+                          (session?.insights as Record<string, unknown> | null)?.videoRecordingUrl as string | undefined;
+                        const audioUrl = session?.audioRecordingUrl;
+                        if (videoUrl) {
+                          return (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2 text-xs gap-1.5 border-primary/40 bg-primary/5 text-primary hover:bg-primary/15 font-medium whitespace-nowrap"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (session) onViewSession(session.id);
+                              }}
+                            >
+                              <Video className="h-3.5 w-3.5 text-primary" />
+                              Watch Video
+                            </Button>
+                          );
+                        }
+                        if (audioUrl) {
+                          return (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-xs gap-1.5 text-muted-foreground hover:text-foreground whitespace-nowrap"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (session) onViewSession(session.id);
+                              }}
+                            >
+                              <Mic className="h-3.5 w-3.5" />
+                              Audio
+                            </Button>
+                          );
+                        }
+                        return <span className="text-muted-foreground text-xs">-</span>;
+                      })(),
                     };
 
                     return (
@@ -1259,32 +1416,106 @@ export function CandidateManager({
                         {/* Frozen right: actions */}
                         <TableCell
                           onClick={(e) => e.stopPropagation()}
-                          className="sticky right-0 z-10 w-10 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]"
+                          className="sticky right-0 z-10 w-24 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]"
                         >
-                          {hasSession && status === "COMPLETED" ? (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              title="View report"
-                              onClick={() => onViewSession(session.id)}
-                            >
-                              <ClipboardList className="h-3.5 w-3.5 text-muted-foreground" />
-                            </Button>
-                          ) : row.type === "candidate" && row.inviteToken ? (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              title="Copy invite link"
-                              data-tour="copy-link"
-                              onClick={() =>
-                                handleCopyInviteLink(row.inviteToken!)
-                              }
-                            >
-                              <LinkIcon className="h-3.5 w-3.5 text-muted-foreground" />
-                            </Button>
-                          ) : null}
+                          <div className="flex items-center justify-end gap-1">
+                            {hasSession && status === "COMPLETED" && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                title="View report"
+                                onClick={() => onViewSession(session.id)}
+                              >
+                                <ClipboardList className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {row.type === "candidate" && row.inviteToken && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                title="Copy invite link"
+                                data-tour="copy-link"
+                                onClick={() =>
+                                  handleCopyInviteLink(row.inviteToken!)
+                                }
+                              >
+                                <LinkIcon className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                  title="Actions"
+                                >
+                                  <MoreHorizontal className="h-3.5 w-3.5" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-52">
+                                {hasSession && (
+                                  <>
+                                    <DropdownMenuItem
+                                      onClick={() => onViewSession(session.id)}
+                                    >
+                                      <ClipboardList className="mr-2 h-4 w-4" />
+                                      {status === "COMPLETED"
+                                        ? "View Report"
+                                        : "View Session"}
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      className="text-destructive focus:text-destructive"
+                                      onClick={() =>
+                                        setItemToDelete({
+                                          type: "session",
+                                          sessionId: session.id,
+                                          name: row.name || "Candidate",
+                                        })
+                                      }
+                                    >
+                                      <Trash2 className="mr-2 h-4 w-4" />
+                                      Delete Session
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
+                                {row.type === "candidate" && (
+                                  <>
+                                    {hasSession && <DropdownMenuSeparator />}
+                                    {row.inviteToken && (
+                                      <DropdownMenuItem
+                                        onClick={() =>
+                                          handleCopyInviteLink(row.inviteToken!)
+                                        }
+                                      >
+                                        <LinkIcon className="mr-2 h-4 w-4" />
+                                        Copy Invite Link
+                                      </DropdownMenuItem>
+                                    )}
+                                    <DropdownMenuItem
+                                      className="text-destructive focus:text-destructive"
+                                      onClick={() =>
+                                        setItemToDelete({
+                                          type: hasSession ? "both" : "candidate",
+                                          sessionId: hasSession ? session.id : undefined,
+                                          candidateId: row.id,
+                                          name: row.name || "Candidate",
+                                        })
+                                      }
+                                    >
+                                      <Trash2 className="mr-2 h-4 w-4" />
+                                      {hasSession
+                                        ? "Delete Candidate & Session"
+                                        : "Delete Candidate"}
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
@@ -1369,6 +1600,66 @@ export function CandidateManager({
               }}
             >
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Single item delete confirmation dialog */}
+      <AlertDialog
+        open={!!itemToDelete}
+        onOpenChange={(open) => !open && setItemToDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {itemToDelete?.type === "session"
+                ? "Delete Interview Session"
+                : itemToDelete?.type === "both"
+                  ? "Delete Candidate & Session"
+                  : "Delete Candidate"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {itemToDelete?.type === "session" ? (
+                <>
+                  Are you sure you want to delete the interview session for{" "}
+                  <strong>{itemToDelete?.name}</strong>? All audio/video
+                  recordings, transcripts, proctoring violation logs, and scores
+                  will be permanently removed. The candidate record will be
+                  retained so they can retake the interview.
+                </>
+              ) : itemToDelete?.type === "both" ? (
+                <>
+                  Are you sure you want to delete{" "}
+                  <strong>{itemToDelete?.name}</strong> and their completed
+                  session? All candidate details, resume data, and interview
+                  results will be permanently deleted. This action cannot be
+                  undone.
+                </>
+              ) : (
+                <>
+                  Are you sure you want to delete{" "}
+                  <strong>{itemToDelete?.name}</strong>? This candidate record
+                  will be permanently removed.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isSingleDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={isSingleDeleting}
+              onClick={(e) => {
+                e.preventDefault();
+                handleConfirmSingleDelete();
+              }}
+            >
+              {isSingleDeleting ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                "Delete"
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

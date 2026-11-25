@@ -100,6 +100,66 @@ async function generateSummary(
       return;
     }
 
+    const candidateResponses = allMessages.filter(
+      (m) =>
+        (m.role === "USER" && m.content && m.content.trim().length > 0) ||
+        (m.contentType === "CODE" && m.whiteboardData) ||
+        (m.contentType === "WHITEBOARD" && m.whiteboardImageUrl),
+    );
+
+    if (candidateResponses.length === 0) {
+      log.info(`Session ${sessionId} has no participant responses — writing zero evaluation`);
+      const emptyInsights = {
+        keyInsights: ["No participant responses were provided during the interview session."],
+        criteriaEvaluations: (assessmentCriteria ?? []).map((c) => ({
+          name: c.name,
+          score: 0,
+          reasoning: "Cannot evaluate: Participant provided no spoken, written, or code responses.",
+        })),
+        questionEvaluations: (questions ?? []).map((q) => ({
+          question: q.text,
+          score: 0,
+          status: "NO_RESPONSE",
+          evidence: "No response provided",
+          evaluation: "The participant did not provide any response for this topic.",
+          highlights: [],
+          improvements: ["Topic was not attempted by the participant."],
+        })),
+        toneAnalysis: {
+          overall: "neutral",
+          details: "No speech detected from participant.",
+          segments: [],
+        },
+      };
+
+      const { data: currentSession } = await supabaseAdmin
+        .from("sessions")
+        .select("insights")
+        .eq("id", sessionId)
+        .single();
+      const currentInsights = (currentSession?.insights as Record<string, unknown>) || {};
+
+      await supabaseAdmin
+        .from("sessions")
+        .update({
+          summary: "The participant did not provide any spoken, written, or code responses during this interview.",
+          themes: ["No Response"],
+          sentiment: {
+            overall: "neutral",
+            details: "No participant engagement was recorded.",
+          },
+          insights: {
+            ...currentInsights,
+            ...emptyInsights,
+            ...(currentInsights.videoRecordingUrl ? { videoRecordingUrl: currentInsights.videoRecordingUrl } : {}),
+            ...(currentInsights.screenshots ? { screenshots: currentInsights.screenshots } : {}),
+          },
+        })
+        .eq("id", sessionId);
+
+      return;
+    }
+
     const whiteboardDrawingsRaw = allMessages
       .filter((m) => m.contentType === "WHITEBOARD" && m.whiteboardData)
       .map((m) => {
@@ -223,13 +283,25 @@ async function generateSummary(
       insightsData.toneAnalysis = parsed.toneAnalysis;
     }
 
+    const { data: currentSession } = await supabaseAdmin
+      .from("sessions")
+      .select("insights")
+      .eq("id", sessionId)
+      .single();
+    const currentInsights = (currentSession?.insights as Record<string, unknown>) || {};
+
     await supabaseAdmin
       .from("sessions")
       .update({
         summary: String(parsed.summary ?? ""),
         themes: (parsed.themes as string[]) ?? [],
         sentiment: parsed.sentiment ?? null,
-        insights: insightsData,
+        insights: {
+          ...currentInsights,
+          ...insightsData,
+          ...(currentInsights.videoRecordingUrl ? { videoRecordingUrl: currentInsights.videoRecordingUrl } : {}),
+          ...(currentInsights.screenshots ? { screenshots: currentInsights.screenshots } : {}),
+        },
       })
       .eq("id", sessionId);
 
@@ -242,7 +314,7 @@ async function generateSummary(
       : 0;
     log.info(
       `Summary generated for session ${sessionId}: ` +
-        `${themeCount} themes, ${insightCount} insights, ${qEvalCount} question evaluations`,
+      `${themeCount} themes, ${insightCount} insights, ${qEvalCount} question evaluations`,
     );
   } catch (error) {
     log.error("Summary generation failed:", error);

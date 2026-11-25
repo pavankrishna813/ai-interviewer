@@ -97,6 +97,7 @@ export default function InviteSessionPage() {
         voiceEnabled={!!interview.voiceEnabled}
         chatEnabled={!!interview.chatEnabled}
         aiName={interview.aiName}
+        sessionId={session.id}
         questionTypes={(interview.questions ?? []).map((q: any) => q.type as string)}
         onComplete={() => setOnboardingDone(true)}
       />
@@ -137,6 +138,7 @@ export default function InviteSessionPage() {
           chatEnabled={!!interview.chatEnabled}
           onComplete={handleComplete}
           videoMode={!!interview.videoEnabled}
+          antiCheatingEnabled={!!interview.antiCheatingEnabled}
         />
       </>
     );

@@ -2034,6 +2034,58 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         }
       } else if (msg.type === "ping") {
         browserWs.send(JSON.stringify({ type: "pong" }));
+      } else if (msg.type === "time_expired") {
+        log.info("Interview time limit reached (Volcengine) — delivering graceful timeout farewell");
+        if (!interviewDone) {
+          isTransitioning = false;
+          awaitingFinalResponse = false;
+          generatingResponse = false;
+          suppressModelOutput = true;
+          pendingTransitionAfterTts = false;
+          pendingPrevTransitionAfterTts = false;
+
+          if (finalResponseTimeout) {
+            clearTimeout(finalResponseTimeout);
+            finalResponseTimeout = null;
+          }
+          if (pendingLastQuestionTimeout) {
+            clearTimeout(pendingLastQuestionTimeout);
+            pendingLastQuestionTimeout = null;
+          }
+
+          const currentQ = sortedQuestions[currentQuestionIndex];
+          const transcriptSnapshot = [...questionTranscript];
+          if (transcriptSnapshot.length > 0 && currentQ) {
+            summarizeQuestion(currentQ.text, transcriptSnapshot, isZh)
+              .then((summary) => questionSummaries.push(summary))
+              .catch(log.error);
+          }
+
+          const farewell = isZh
+            ? "抱歉打扰一下，本次面试的规定时间已经到了，我们今天的交流就到这里。非常感谢您今天的参与和详尽回答！招聘团队会尽快复核面试记录并与您联系后续事宜。祝您生活愉快，再见！"
+            : "Excuse me, I see our allotted time for this interview has reached its limit, so we will wrap things up here. Thank you so much for your time and thoughtful responses today! The recruiting team will review your session and be in touch soon. Have a wonderful day!";
+
+          awaitingSayHelloTts = true;
+          skipNextTtsTranscript = true;
+
+          if (!volcWs || volcWs.readyState !== WebSocket.OPEN || !isAlive) {
+            log.warn("Relay unavailable on time_expired, ending interview directly");
+            endInterview();
+            return;
+          }
+
+          volcWs.send(buildSayHello(volcSessionId, farewell));
+          questionTranscript.push({ role: "assistant", text: farewell });
+          pendingInterviewEnd = true;
+
+          setTimeout(() => {
+            if (pendingInterviewEnd && !interviewDone) {
+              log.warn("Farewell TTS timed out after 12s on time_expired — forcing interview end");
+              pendingInterviewEnd = false;
+              endInterview();
+            }
+          }, 12_000);
+        }
       }
     } catch (err) {
       log.error("Error handling browser message:", err);

@@ -245,6 +245,7 @@ export function SessionsTable({
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [sessionToDelete, setSessionToDelete] = useState<SessionRow | null>(null);
   const [visibleColumns, setVisibleColumns] = useState<Set<string>>(
     () => new Set(COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key)),
   );
@@ -670,51 +671,53 @@ export function SessionsTable({
                     ))}
 
                     {/* Frozen right: gear icon */}
-                    <TableHead className="sticky right-0 z-20 w-10 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]">
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                          >
-                            <Settings className="h-4 w-4 text-muted-foreground" />
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent align="end" className="w-48 p-1">
-                          <div className="max-h-[320px] overflow-y-auto code-scrollbar">
-                            {activeColumns
-                              .filter((col) => !col.alwaysVisible)
-                              .map((col) => (
-                                <div
-                                  key={col.key}
-                                  data-col-key={col.key}
-                                  className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors ${
-                                    draggingCol === col.key
-                                      ? "bg-accent/80 opacity-50"
-                                      : dragOverCol === col.key
-                                        ? "border-t-2 border-primary bg-primary/5"
-                                        : "hover:bg-accent"
-                                  }`}
-                                >
-                                  <GripVertical
-                                    className="h-3.5 w-3.5 shrink-0 cursor-grab touch-none text-muted-foreground/50 active:cursor-grabbing"
-                                    onPointerDown={(e) => handleGripPointerDown(col.key, e)}
-                                  />
-                                  <span
-                                    className="flex-1 cursor-pointer select-none text-left"
-                                    onClick={() => { if (!draggingCol) toggleColumn(col.key); }}
+                    <TableHead className="sticky right-0 z-20 w-20 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]">
+                      <div className="flex items-center justify-end">
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                            >
+                              <Settings className="h-4 w-4 text-muted-foreground" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent align="end" className="w-48 p-1">
+                            <div className="max-h-[320px] overflow-y-auto code-scrollbar">
+                              {activeColumns
+                                .filter((col) => !col.alwaysVisible)
+                                .map((col) => (
+                                  <div
+                                    key={col.key}
+                                    data-col-key={col.key}
+                                    className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors ${
+                                      draggingCol === col.key
+                                        ? "bg-accent/80 opacity-50"
+                                        : dragOverCol === col.key
+                                          ? "border-t-2 border-primary bg-primary/5"
+                                          : "hover:bg-accent"
+                                    }`}
                                   >
-                                    {col.label}
-                                  </span>
-                                  {visibleColumns.has(col.key) && (
-                                    <Check className="h-4 w-4 shrink-0 text-primary" />
-                                  )}
-                                </div>
-                              ))}
-                          </div>
-                        </PopoverContent>
-                      </Popover>
+                                    <GripVertical
+                                      className="h-3.5 w-3.5 shrink-0 cursor-grab touch-none text-muted-foreground/50 active:cursor-grabbing"
+                                      onPointerDown={(e) => handleGripPointerDown(col.key, e)}
+                                    />
+                                    <span
+                                      className="flex-1 cursor-pointer select-none text-left"
+                                      onClick={() => { if (!draggingCol) toggleColumn(col.key); }}
+                                    >
+                                      {col.label}
+                                    </span>
+                                    {visibleColumns.has(col.key) && (
+                                      <Check className="h-4 w-4 shrink-0 text-primary" />
+                                    )}
+                                  </div>
+                                ))}
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
                     </TableHead>
                   </TableRow>
                 </TableHeader>
@@ -761,21 +764,32 @@ export function SessionsTable({
                       {/* Frozen right: action */}
                       <TableCell
                         onClick={(e) => e.stopPropagation()}
-                        className="sticky right-0 z-10 w-10 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]"
+                        className="sticky right-0 z-10 w-20 bg-background shadow-[-2px_0_5px_-2px_rgba(0,0,0,0.1)]"
                       >
-                        {rowClickable && session.status === "COMPLETED" ? (
-                          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                        ) : (
+                        <div className="flex items-center justify-end gap-1">
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
                             title="View session details"
                             onClick={() => onSessionClick(session)}
                           >
-                            <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
+                            {rowClickable && session.status === "COMPLETED" ? (
+                              <ChevronRight className="h-4 w-4" />
+                            ) : (
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            )}
                           </Button>
-                        )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-destructive transition-colors"
+                            title="Delete session"
+                            onClick={() => setSessionToDelete(session)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -861,6 +875,50 @@ export function SessionsTable({
               }}
             >
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Single session delete confirmation dialog */}
+      <AlertDialog
+        open={!!sessionToDelete}
+        onOpenChange={(open) => !open && setSessionToDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Interview Session</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete the session for{" "}
+              <strong>
+                {sessionToDelete?.participantName ||
+                  sessionToDelete?.participantEmail ||
+                  "this candidate"}
+              </strong>
+              ? All interview messages, proctoring violations, recordings, and evaluations will be
+              permanently removed. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteMutation.isLoading}
+              onClick={async (e) => {
+                e.preventDefault();
+                if (!sessionToDelete) return;
+                await deleteMutation.mutateAsync({ ids: [sessionToDelete.id] });
+                setSessionToDelete(null);
+                onDeleteSuccess?.();
+              }}
+            >
+              {deleteMutation.isLoading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                "Delete"
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

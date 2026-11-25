@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -13,24 +14,24 @@
     --popover: 0 0% 100%;
     --popover-foreground: 0 0% 20%;
 
-    --primary: 14 52% 49%;
+    --primary: 216 90% 44%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 138 31% 87%;
-    --secondary-foreground: 138 25% 23%;
+    --secondary: 216 30% 92%;
+    --secondary-foreground: 216 40% 20%;
 
-    --muted: 45 22% 89%;
-    --muted-foreground: 0 0% 29%;
+    --muted: 216 15% 92%;
+    --muted-foreground: 216 10% 40%;
 
-    --accent: 25 77% 88%;
-    --accent-foreground: 23 57% 18%;
+    --accent: 216 85% 94%;
+    --accent-foreground: 216 90% 30%;
 
     --destructive: 0 75% 42%;
     --destructive-foreground: 0 0% 100%;
 
     --border: 41 16% 80%;
     --input: 41 16% 80%;
-    --ring: 14 52% 49%;
+    --ring: 216 90% 44%;
 
     --radius: 0.5rem;
   }
@@ -45,24 +46,24 @@
     --popover: 40 24% 12%;
     --popover-foreground: 40 24% 90%;
 
-    --primary: 14 76% 68%;
-    --primary-foreground: 14 57% 18%;
+    --primary: 216 90% 60%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 36 12% 17%;
+    --secondary: 216 20% 18%;
     --secondary-foreground: 40 24% 90%;
 
-    --muted: 36 12% 17%;
-    --muted-foreground: 41 10% 62%;
+    --muted: 216 20% 18%;
+    --muted-foreground: 216 10% 65%;
 
-    --accent: 21 49% 23%;
-    --accent-foreground: 25 77% 88%;
+    --accent: 216 50% 20%;
+    --accent-foreground: 216 85% 90%;
 
     --destructive: 0 91% 71%;
     --destructive-foreground: 0 0% 100%;
 
     --border: 37 12% 21%;
     --input: 37 12% 21%;
-    --ring: 14 76% 68%;
+    --ring: 216 90% 60%;
   }
 }
 
@@ -70,17 +71,27 @@
   * {
     @apply border-border;
   }
+
   html {
     scroll-behavior: smooth;
   }
+
   body {
     @apply bg-background text-foreground;
+    font-family: 'Outfit', var(--font-body), system-ui, sans-serif;
   }
+
   body:has(.dashboard-shell) {
     overflow: hidden;
   }
-  h1, h2, h3, h4, h5, h6 {
-    font-family: var(--font-heading), system-ui, sans-serif;
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: 'Outfit', var(--font-heading), system-ui, sans-serif;
   }
 }
 
@@ -89,25 +100,31 @@
   scrollbar-width: thin;
   scrollbar-color: hsl(var(--muted-foreground) / 0.25) transparent;
 }
+
 .code-scrollbar:hover {
   scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
 }
+
 .code-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
+
 .code-scrollbar::-webkit-scrollbar-track {
   background: transparent;
   border-radius: 3px;
 }
+
 .code-scrollbar::-webkit-scrollbar-thumb {
   background-color: hsl(var(--muted-foreground) / 0.2);
   border-radius: 3px;
   transition: background-color 0.2s;
 }
+
 .code-scrollbar::-webkit-scrollbar-thumb:hover {
   background-color: hsl(var(--muted-foreground) / 0.4);
 }
+
 .code-scrollbar::-webkit-scrollbar-corner {
   background: transparent;
 }
@@ -179,7 +196,7 @@
     height: auto !important;
   }
 
-  main > * > * {
+  main>*>* {
     overflow: visible !important;
   }
 
@@ -187,7 +204,7 @@
     overflow: visible !important;
   }
 
-  .space-y-6 > * {
+  .space-y-6>* {
     break-inside: avoid;
   }
 }
@@ -196,6 +213,7 @@
 .ai-border-spin {
   position: relative;
 }
+
 .ai-border-spin::before {
   content: "";
   position: absolute;
@@ -204,23 +222,32 @@
   width: 200%;
   aspect-ratio: 1;
   translate: -50% -50%;
-  background: conic-gradient(
-    from 0deg,
-    #f43f5e, #f59e0b, #10b981, #3b82f6, #8b5cf6, #f43f5e
-  );
+  background: conic-gradient(from 0deg,
+      #f43f5e, #f59e0b, #10b981, #3b82f6, #8b5cf6, #f43f5e);
   border-radius: 50%;
   animation: ai-spin 2s linear infinite;
   will-change: transform;
 }
+
 @keyframes ai-spin {
-  to { rotate: 360deg; }
+  to {
+    rotate: 360deg;
+  }
 }
 
 /* Guided tour */
 .tour-tooltip-enter {
   animation: tour-fade-in 0.25s ease-out;
 }
+
 @keyframes tour-fade-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

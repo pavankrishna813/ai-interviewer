@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { AuralLogo } from "@/components/ui/aural-logo";
+import { TrovenLogo } from "@/components/ui/aural-logo";
 import { DocsSearch } from "./docs-search";
 import { ExternalLink } from "lucide-react";
 
@@ -11,15 +11,13 @@ export function DocsHeader() {
       <div className="flex items-center gap-6 px-6 py-3">
         <Link
           href="/docs"
-          className="flex items-center gap-1.5 shrink-0 group"
+          className="flex items-center gap-2 shrink-0 group"
         >
-          <AuralLogo
-            size={30}
-            className="transition-transform duration-300 group-hover:scale-110"
+          <TrovenLogo
+            size={28}
+            variant="full"
+            className="h-7 w-auto transition-transform duration-300 group-hover:scale-105"
           />
-          <span className="font-heading text-base font-bold tracking-[1.5px] text-mk-text">
-            AURAL
-          </span>
         </Link>
 
         <div className="flex-1 max-w-lg mx-auto">
@@ -36,10 +34,10 @@ export function DocsHeader() {
             <ExternalLink className="h-3 w-3" />
           </Link>
           <Link
-            href="/register"
+            href="/login"
             className="bg-mk-dark text-mk-text-light text-xs font-semibold px-4 py-2 rounded-lg hover:bg-mk-dark/80 transition-all duration-200"
           >
-            Get Started
+            Sign In
           </Link>
         </nav>
       </div>

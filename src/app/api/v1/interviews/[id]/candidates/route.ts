@@ -7,7 +7,7 @@ import {
 import { nanoid } from "@/lib/id";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 
-const APP_BASE = process.env.NEXT_PUBLIC_APP_URL ?? "https://aural-ai.com";
+const APP_BASE = process.env.NEXT_PUBLIC_APP_URL ?? "https://interview.troven.in";
 
 type CandidateInput = {
   name?: unknown;

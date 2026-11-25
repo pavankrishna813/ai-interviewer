@@ -80,6 +80,95 @@ const COMMON_HALLUCINATIONS = new Set([
   "that's all there is to it",
   "thanks for watching. bye.",
   "thanks for watching. bye",
+  "see ya.",
+  "see ya",
+  "see ya!",
+  "seeya",
+  "see ya later.",
+  "see ya later",
+  "bye now.",
+  "bye now",
+  "take care.",
+  "take care",
+  "alright. peace.",
+  "alright peace.",
+  "alright peace",
+  "all right peace",
+  "all right. peace.",
+  "yep. ok.",
+  "yep. ok",
+  "yep ok",
+  "www.microsoft.com.",
+  "www.microsoft.com",
+  "microsoft.com",
+  "karen.",
+  "karen",
+  "steve.",
+  "steve",
+  "commenting.",
+  "commenting",
+  "and many more.",
+  "and many more",
+  "yep.",
+  "yep",
+  "peace.",
+  "peace",
+  "it's a lot of work.",
+  "it's a lot of work",
+  "courses.",
+  "courses",
+  "and more.",
+  "and more",
+  "and more. thank you.",
+  "and more. thank you",
+  "more.",
+  "more",
+  "thank you very much, everybody.",
+  "thank you very much, everybody",
+  "thank you very much everybody.",
+  "thank you very much everybody",
+  "and much more. thank you.",
+  "and much more. thank you",
+  "much more. thank you.",
+  "much more. thank you",
+  "thank you very much for being here. see you next year. thank you.",
+  "thank you very much for being here. see you next year. thank you",
+  "thank you very much for being here.",
+  "thank you very much for being here",
+  "see you next year. thank you.",
+  "see you next year. thank you",
+  "see you next year.",
+  "see you next year",
+  "you know.",
+  "you know",
+  "it's good.",
+  "it's good",
+  "can we close it for a bit?",
+  "can we close it for a bit",
+  "can we close it?",
+  "can we close it",
+  "i am feeling good now.",
+  "i am feeling good now",
+  "i am not feeling good.",
+  "i am not feeling good",
+  "i don't think you can beat him.",
+  "i don't think you can beat him",
+  "that's an old-fashioned way to go bykeevalt and it wasn't very practical either.",
+  "that's an old-fashioned way to go bykeevalt and it wasn't very practical either",
+  "etc.",
+  "etc",
+  "much.",
+  "much",
+  "always.",
+  "always",
+  "cell hyperlinks",
+  "admin desktop",
+  "rearm menus",
+  "administrative packages",
+  "i'm steve.",
+  "i'm steve",
+  "im steve.",
+  "im steve",
 ]);
 
 const HALLUCINATION_WORD_SET = new Set([
@@ -117,6 +206,12 @@ const HALLUCINATION_WORD_SET = new Set([
   "then",
   "later",
   "closing",
+  "peace",
+  "yep",
+  "alright",
+  "here",
+  "next",
+  "year",
 ]);
 
 const ISOLATED_SILENCE_FILLERS = new Set([
@@ -143,20 +238,102 @@ export function isWhisperHallucination(text: string, lang = "en"): boolean {
   const lower = trimmed.toLowerCase();
   if (COMMON_HALLUCINATIONS.has(lower)) return true;
 
+  // Reject URL/domain hallucinations (e.g. https://sites.google.com, www.youtube.com, etc.)
+  if (
+    /https?:\/\//i.test(lower) ||
+    /\bwww\.[a-z0-9-]+\.[a-z]{2,}/i.test(lower) ||
+    /\bsites\.google\b/i.test(lower) ||
+    /\b[a-z0-9-]+\.(?:com|org|net|io|edu|gov|co|in)\b/i.test(lower)
+  ) {
+    return true;
+  }
+
+  // Reject legal/video disclaimer, description links, & platform boilerplate
+  if (
+    /\b(?:disclaimer|terms\s+of\s+(?:service|use)|privacy\s+policy|all\s+rights\s+reserved|copyright)\b/i.test(lower) ||
+    /\b(?:please\s+)?see\s+(?:the\s+)?(?:complete\s+)?disclaimer\b/i.test(lower) ||
+    /\bvisit\s+(?:our|the)\s+website\b/i.test(lower) ||
+    /\bcheck\s+(?:out\s+)?(?:the\s+)?link\b/i.test(lower) ||
+    /\blink\s+in\s+the\s+description\b/i.test(lower) ||
+    /\bfor\s+more\s+(?:info|information)\b/i.test(lower) ||
+    /\b(?:patreon|paypal|instagram|twitter|tiktok|facebook)\b/i.test(lower)
+  ) {
+    return true;
+  }
+
   const stripped = lower.replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
   if (stripped.length === 0) return true;
   if (COMMON_HALLUCINATIONS.has(stripped)) return true;
   if (ISOLATED_SILENCE_FILLERS.has(stripped)) return true;
 
+  // Definitive hallucination patterns that must never appear in candidate speech
+  if (
+    /\b(?:thank\s+you|thanks)\s+(?:very\s+much\s+)?for\s+watching\b/i.test(stripped) ||
+    /\b(?:like\s+and\s+subscribe|please\s+subscribe|subscribe\s+to\s+(?:my|the|our)\s+channel)\b/i.test(stripped) ||
+    /\bsee\s+you\s+(?:in\s+the\s+next\s+video|in\s+my\s+next\s+video)\b/i.test(stripped) ||
+    /\bhope\s+you\s+enjoyed\s+this\s+video\b/i.test(stripped) ||
+    /\bi'?m\s+steve\b/i.test(stripped) ||
+    /\bcell\s+hyperlinks\b/i.test(stripped) ||
+    /\badmin\s+desktop\b/i.test(stripped) ||
+    /\brearm\s+menus\b/i.test(stripped) ||
+    /\badministrative\s+packages\b/i.test(stripped) ||
+    /^(?:etc|much|always|more|and\s+more|q\s*&?\s*a|q&a)[\s.,!]*$/i.test(stripped) ||
+    /\b(?:subtitles?|transcript(?:ion)?|translated|captioned)\s+by\b/i.test(stripped) ||
+    /\b(?:microsoft\s+office|word\.document|msworddoc|worddoc|word\.document\.8|office\s+word|rtf\s+document|powerpoint|excel|acrobat)\b/i.test(stripped) ||
+    /\b(?:next\s+slide|previous\s+slide|slide\s+please|this\s+lecture|next\s+lecture|in\s+this\s+lecture|watch(?:ing)?\s+this\s+lecture|thank\s+you\s+for\s+watching\s+this\s+lecture)\b/i.test(stripped) ||
+    /\b(?:cosplay|anime|manga|otaku|fandom|take\s+up\s+the\s+whole\s+floor|without\s+sanity|brain-dead\s+right\s+here|full\s+episode|check\s+the\s+description)\b/i.test(stripped) ||
+    /\b(?:in\s+amish)\b/i.test(stripped) ||
+    /\b([a-zA-Z]{3,}(?:\s+[a-zA-Z]{3,})?)\b(?:\s+\1\b){2,}/i.test(stripped)
+  ) {
+    return true;
+  }
+
   const words = stripped.split(" ").filter(Boolean);
 
-  // Check if every word in a short phrase (<= 6 words) is a hallucination token
-  if (words.length <= 6 && words.every((w) => HALLUCINATION_WORD_SET.has(w))) {
+  // Distinguish true hallucinations (YouTube outros, subtitle credits, signoff loops)
+  const STRONG_HALLUCINATION_WORDS = new Set([
+    "watching",
+    "subscribe",
+    "subtitles",
+    "captioned",
+    "translated",
+    "goodbye",
+    "byebye",
+    "bye",
+    "recorded",
+    "closing",
+    "lord",
+    "slide",
+    "cosplay",
+    "msworddoc",
+  ]);
+
+  // Check if every word in a short phrase (<= 6 words) is from the hallucination set AND contains a strong marker
+  if (
+    words.length <= 6 &&
+    words.every((w) => HALLUCINATION_WORD_SET.has(w)) &&
+    words.some((w) => STRONG_HALLUCINATION_WORDS.has(w))
+  ) {
+    return true;
+  }
+
+  // Any short combination (<= 4 words) made exclusively of greetings/closings/fillers without substantive answer
+  // e.g. "Thank you. Bye. Bye.", "Bye bye", "Okay. Thank you.", "Thank you bye"
+  if (
+    words.length >= 2 &&
+    words.length <= 4 &&
+    words.every((w) => /^(?:thank|thanks|you|bye|goodbye|byebye|ok|okay|all|right|yep|yeah|so)$/i.test(w)) &&
+    words.some((w) => /^(?:bye|goodbye|byebye)$/i.test(w))
+  ) {
     return true;
   }
 
   // Repetitive tokens (e.g. "bye bye bye", "bye-bye.bye-bye.")
   if (words.length >= 2 && words.every((w) => w === words[0] || w === "bye")) {
+    const allowedRepeatedWords = new Set(["hello", "hi", "yes", "no", "ok", "okay", "sure", "testing", "right"]);
+    if (words.length === 2 && allowedRepeatedWords.has(words[0])) {
+      return false;
+    }
     return true;
   }
 
@@ -176,6 +353,18 @@ export function isWhisperHallucination(text: string, lang = "en"): boolean {
 
   // Common conversational hallucination patterns on tail breaths / noise bursts
   if (
+    /^(?:and\s+)?(?:much\s+)?more[\s.,!]*$/i.test(stripped) ||
+    /^(?:thank\s+you[\s.,!]*){2,}$/i.test(stripped) ||
+    /^(?:thanks[\s.,!]*){2,}$/i.test(stripped) ||
+    /^(?:okay[\s.,!]*){3,}$/i.test(stripped) ||
+    /\b(?:signal\s+question|change\s+question\s+index|signal_question_change)\b/i.test(stripped) ||
+    /^tor\b/i.test(stripped) ||
+    /\bthank\s+you\s+(?:very\s+|all\s+)?(?:so\s+)?much\s+for\s+being\s+here\b/i.test(stripped) ||
+    /\bsee\s+you\s+next\s+year\b/i.test(stripped) ||
+    /^(?:alright|all\s+right|yep|yeah)[\s,.]+(?:peace|ok|okay)[\s,.]*$/i.test(stripped) ||
+    /^(?:yep|yeah)[\s,.]+(?:ok|okay)[\s,.]*$/i.test(stripped) ||
+    /^(?:ok|okay)[\s,.]+(?:yep|yeah)[\s,.]*$/i.test(stripped) ||
+    /^(?:peace|yep|alright|see\s*ya|seeya)[\s,.]*$/i.test(stripped) ||
     /^(i\s*('?ll|will)|we\s*('?ll|will))\s+see\s+you\b/i.test(stripped) ||
     /^(so\s+)?(i\s*('?ll|will))\s+try\s+to\s+(complete|finish)\b/i.test(stripped) ||
     /^(i\s*('?ll|will))\s+be\s+(right\s+)?back\b/i.test(stripped) ||
@@ -202,8 +391,8 @@ export function isWhisperHallucination(text: string, lang = "en"): boolean {
 
   // Non-English script hallucination when interview language is English
   if (lang.toLowerCase().startsWith("en")) {
-    // Devanagari (Hindi \u0900-\u097F), Cyrillic (\u0400-\u04FF), Arabic (\u0600-\u06FF), CJK (\u4E00-\u9FFF)
-    if (/[\u0900-\u097F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF]/.test(trimmed)) {
+    // Devanagari (Hindi \u0900-\u097F), Cyrillic (\u0400-\u04FF), Arabic (\u0600-\u06FF), CJK (\u4E00-\u9FFF), Korean Hangul (\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F)
+    if (/[\u0900-\u097F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/.test(trimmed)) {
       return true;
     }
     // Non-English Latin diacritics that do not appear in standard English words

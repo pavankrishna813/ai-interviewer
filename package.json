@@ -1,32 +1,26 @@
 {
-  "name": "aural",
+  "name": "troven",
   "version": "0.1.0",
   "private": true,
-  "description": "Open-source AI interview platform for voice, chat, and video",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/1146345502/aural-oss.git"
-  },
-  "homepage": "https://github.com/1146345502/aural-oss#readme",
-  "bugs": {
-    "url": "https://github.com/1146345502/aural-oss/issues"
-  },
-  "license": "MIT",
-  "author": "Aural",
+  "description": "AI interview platform for voice, chat, and video",
+  "author": "Troven",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test:web": "node --import tsx --test tests/session-score.test.ts tests/relay-routing.test.ts tests/voice-save-route.test.ts tests/playback-jitter-buffer.test.ts tests/openai-voice-relay-helpers.test.ts tests/voice-relay-helpers.test.ts tests/api-rate-limit.test.ts tests/interview-templates.test.ts tests/api-key-auth.test.ts tests/session-lifecycle.test.ts tests/voice-relay-reconnect.test.ts",
+    "test:web": "node --import tsx --test tests/session-score.test.ts tests/relay-routing.test.ts tests/voice-save-route.test.ts tests/playback-jitter-buffer.test.ts tests/openai-voice-relay-helpers.test.ts tests/voice-interview-flow.test.ts tests/interviewer-failure-modes.test.ts tests/voice-relay-helpers.test.ts tests/api-rate-limit.test.ts tests/interview-templates.test.ts tests/api-key-auth.test.ts tests/session-lifecycle.test.ts tests/voice-relay-reconnect.test.ts",
     "test:functional": "node --import tsx --test --test-concurrency=1 tests/functional.test.ts",
     "db:types": "npx supabase gen types typescript --local > src/lib/supabase/types.ts",
     "dev:voice": "npx tsx server/voice-relay.ts",
     "dev:openai-voice": "npx tsx server/openai-voice-relay.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1167.0",
+    "@aws-sdk/s3-request-presigner": "^3.1167.0",
     "@excalidraw/excalidraw": "^0.18.0",
     "@hookform/resolvers": "^5.2.2",
+    "@mediapipe/tasks-vision": "^1.2.3",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-avatar": "^1.1.11",
@@ -52,6 +46,7 @@
     "@trpc/next": "^10.45.4",
     "@trpc/react-query": "^10.45.4",
     "@trpc/server": "^10.45.4",
+    "@vladmandic/human": "^3.3.6",
     "bufferutil": "^4.1.0",
     "canvas-confetti": "^1.9.4",
     "cheerio": "^1.2.0",
@@ -59,6 +54,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "dotenv": "^17.3.1",
+    "esbuild": "^0.28.2",
     "fix-webm-duration": "^1.0.6",
     "html2canvas-pro": "^1.6.7",
     "jose": "^6.2.0",

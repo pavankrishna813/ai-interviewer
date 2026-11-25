@@ -2,26 +2,30 @@
 
 import { PreparingScreen } from "@/components/session/preparing-screen";
 import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { AuralLogo } from "@/components/ui/aural-logo";
+import { TrovenLogo } from "@/components/ui/aural-logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { InterviewContext } from "@/hooks/use-voice";
 import { getMicTestMessage, getSpeechSynthesisLocale } from "@/lib/i18n";
 import {
-    setCameraSkipped,
-    setScreenSkipped,
-    setStoredScreenStream,
+  setCameraSkipped,
+  setScreenSkipped,
+  setStoredCameraStream,
+  setStoredReferenceFaceVector,
+  setStoredReferencePhoto,
+  setStoredScreenStream,
 } from "@/lib/media-stream-store";
+import { detectFace } from "@/lib/proctor/face-check";
 import {
   buildRelayTargets,
   isRecoverableRelayErrorMessage,
@@ -30,18 +34,19 @@ import {
 } from "@/lib/voice/relay-routing";
 import { cn } from "@/lib/utils";
 import {
-    AlertCircle,
-    AudioLines,
-    Camera,
-    Check,
-    CheckCircle2,
-    Loader2,
-    Mic,
-    Monitor,
-    RefreshCw,
-    RotateCcw,
-    ScreenShare,
-    User,
+  AlertCircle,
+  AudioLines,
+  Camera,
+  Check,
+  CheckCircle2,
+  Headphones,
+  Loader2,
+  Mic,
+  Monitor,
+  RefreshCw,
+  RotateCcw,
+  ScreenShare,
+  User,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatInterface } from "./chat-interface";
@@ -60,6 +65,7 @@ interface IntervieweeOnboardingProps {
   chatEnabled?: boolean;
   aiName?: string;
   questionTypes?: string[];
+  sessionId?: string;
   onComplete: () => void;
 }
 
@@ -236,10 +242,12 @@ function CameraCheck({
   done,
   onDone,
   allowSkip = true,
+  sessionId,
 }: {
   done: boolean;
   onDone: () => void;
   allowSkip?: boolean;
+  sessionId?: string;
 }) {
   const [showSkipDialog, setShowSkipDialog] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -248,6 +256,8 @@ function CameraCheck({
   const [photo, setPhoto] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [faceDetected, setFaceDetected] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (streaming && videoRef.current && streamRef.current) {
@@ -255,8 +265,36 @@ function CameraCheck({
     }
   }, [streaming]);
 
+  // Periodic live face presence check while camera is streaming
+  useEffect(() => {
+    if (!streaming) {
+      setFaceDetected(null);
+      return;
+    }
+
+    let active = true;
+    const interval = setInterval(async () => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || !active) return;
+      try {
+        const res = await detectFace(video);
+        if (active) {
+          setFaceDetected(res.hasFace);
+        }
+      } catch {
+        // non-blocking
+      }
+    }, 400);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [streaming]);
+
   const startCamera = useCallback(async () => {
     setError(null);
+    setFaceDetected(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
@@ -275,25 +313,77 @@ function CameraCheck({
     setStreaming(false);
   }, []);
 
-  const capture = useCallback(() => {
+  const capture = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
+
+    setIsCapturing(true);
+    setError(null);
+
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) {
+      setIsCapturing(false);
+      return;
+    }
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-    stopCamera();
-    setPhoto(dataUrl);
-    onDone();
-  }, [stopCamera, onDone]);
+
+    // Strict face presence verification before accepting the photo
+    try {
+      const check = await detectFace(canvas);
+      if (!check.hasFace) {
+        setIsCapturing(false);
+        setFaceDetected(false);
+        setError(check.reason || "No face detected. Please ensure your face is clearly centered in the camera frame before capturing.");
+        return;
+      }
+
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.88);
+      setStoredReferencePhoto(dataUrl);
+      if (check.vector) {
+        setStoredReferenceFaceVector(check.vector);
+        try {
+          localStorage.setItem("storedEmbedding", JSON.stringify(check.vector));
+        } catch {}
+      }
+      if (streamRef.current) {
+        setStoredCameraStream(streamRef.current);
+      }
+
+      // Asynchronously upload the reference photo to S3/session storage
+      if (sessionId && sessionId !== "__preview__") {
+        try {
+          canvas.toBlob(async (blob) => {
+            if (!blob) return;
+            const form = new FormData();
+            form.append("file", blob, "reference-photo.jpg");
+            form.append("sessionId", sessionId);
+            form.append("type", "screenshot");
+            form.append("filename", "reference-photo.jpg");
+            await fetch("/api/session/upload", { method: "POST", body: form }).catch(() => {});
+          }, "image/jpeg", 0.85);
+        } catch {
+          // non-blocking upload
+        }
+      }
+
+      setIsCapturing(false);
+      stopCamera();
+      setPhoto(dataUrl);
+      onDone();
+    } catch (err) {
+      setIsCapturing(false);
+      setError("Error verifying face presence. Please try again.");
+    }
+  }, [stopCamera, onDone, sessionId]);
 
   const retake = useCallback(() => {
     setPhoto(null);
+    setFaceDetected(null);
     startCamera();
   }, [startCamera]);
 
@@ -316,13 +406,28 @@ function CameraCheck({
                 className="h-full w-full object-cover"
               />
             ) : streaming ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="h-full w-full scale-x-[-1] object-cover"
-              />
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="h-full w-full scale-x-[-1] object-cover"
+                />
+                <div className="pointer-events-none absolute bottom-1.5 inset-x-1.5 flex justify-center">
+                  {faceDetected === true ? (
+                    <span className="flex items-center gap-1 rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium text-emerald-400 backdrop-blur-sm shadow-sm">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Face Detected
+                    </span>
+                  ) : faceDetected === false ? (
+                    <span className="flex items-center gap-1 rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium text-amber-300 backdrop-blur-sm shadow-sm">
+                      <AlertCircle className="h-3 w-3" />
+                      Align Face in Frame
+                    </span>
+                  ) : null}
+                </div>
+              </>
             ) : (
               <div className="flex h-full w-full flex-col items-center justify-center gap-2">
                 <User className="h-10 w-10 text-muted-foreground/30" />
@@ -339,8 +444,22 @@ function CameraCheck({
             </Button>
           )}
           {streaming && (
-            <Button size="sm" onClick={capture} className="w-full">
-              Capture
+            <Button
+              size="sm"
+              onClick={capture}
+              disabled={isCapturing || faceDetected === false}
+              className="w-full"
+            >
+              {isCapturing ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  Verifying Face...
+                </>
+              ) : faceDetected === false ? (
+                "Align Face to Capture"
+              ) : (
+                "Capture"
+              )}
             </Button>
           )}
           {photo && (
@@ -425,6 +544,7 @@ type MicPhase = "idle" | "requesting" | "playing" | "listening" | "analyzing" | 
 
 function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean; onDone: () => void; language?: string; allowSkip?: boolean }) {
   const [phase, setPhase] = useState<MicPhase>("idle");
+  const [micLevel, setMicLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [showSkipDialog, setShowSkipDialog] = useState(false);
   const [skipped, setSkipped] = useState(false);
@@ -442,12 +562,13 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
   languageRef.current = language;
 
   const stopAll = useCallback(() => {
+    setMicLevel(0);
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
     if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current.close().catch(() => { });
       audioCtxRef.current = null;
     }
     if (audioRef.current) {
@@ -457,7 +578,7 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
     relayConnectorRef.current?.close();
     relayConnectorRef.current = null;
     if (micCtxRef.current) {
-      micCtxRef.current.close().catch(() => {});
+      micCtxRef.current.close().catch(() => { });
       micCtxRef.current = null;
     }
     if (micStreamRef.current) {
@@ -487,7 +608,7 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
 
   const stopTtsPlayback = useCallback(() => {
     if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current.close().catch(() => { });
       audioCtxRef.current = null;
     }
     if (audioRef.current) {
@@ -537,9 +658,9 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
               finish(lastAsrText);
             }
           };
-          browserRecognition.onerror = () => {};
+          browserRecognition.onerror = () => { };
           browserRecognition.start();
-        } catch {}
+        } catch { }
       }
     }
 
@@ -547,11 +668,11 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
       if (handled) return;
       handled = true;
       if (browserRecognition) {
-        try { browserRecognition.stop(); } catch {}
+        try { browserRecognition.stop(); } catch { }
       }
       stopTtsPlayback();
       if (micCtxRef.current) {
-        micCtxRef.current.close().catch(() => {});
+        micCtxRef.current.close().catch(() => { });
         micCtxRef.current = null;
       }
       if (micStreamRef.current) {
@@ -613,6 +734,13 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
         worklet.port.onmessage = (e) => {
           if (handled || !relayConnectorRef.current?.isReady) return;
           const input = e.data as Float32Array;
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) {
+            sum += input[i] * input[i];
+          }
+          const rms = Math.sqrt(sum / input.length);
+          setMicLevel(Math.min(1, rms * 10));
+
           const pcm = new Int16Array(input.length);
           for (let i = 0; i < input.length; i++) {
             pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
@@ -784,7 +912,7 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
         if (remaining > 0) {
           await new Promise((r) => setTimeout(r, remaining * 1000 + 100));
         }
-        ctx.close().catch(() => {});
+        ctx.close().catch(() => { });
         audioCtxRef.current = null;
         abortRef.current = null;
         startListening();
@@ -796,7 +924,7 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
     }
 
     fallbackToSpeechSynthesis();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startListening]);
 
   const fallbackToSpeechSynthesis = useCallback(() => {
@@ -852,13 +980,29 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
               </div>
             )}
             {phase === "listening" && (
-              <div className="flex flex-col items-center gap-1">
-                <div className="flex gap-1">
-                  <div className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
-                  <span className="text-[11px] font-medium text-destructive">Listening...</span>
+              <div className="flex flex-col items-center gap-1.5 w-full px-2">
+                <div className="flex items-center gap-1">
+                  <div className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+                  <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">Listening to your mic...</span>
+                </div>
+                {/* Live VU Meter */}
+                <div className="flex items-center gap-1 h-3.5 w-full justify-center">
+                  {Array.from({ length: 8 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "w-1.5 rounded-full transition-all duration-75",
+                        micLevel * 8 > i
+                          ? i > 5
+                            ? "bg-amber-500 h-3.5"
+                            : "bg-emerald-500 h-3"
+                          : "bg-muted-foreground/20 h-1"
+                      )}
+                    />
+                  ))}
                 </div>
                 {transcript && (
-                  <span className="max-w-[10rem] truncate text-[10px] text-muted-foreground">
+                  <span className="max-w-[10rem] truncate text-[10px] text-muted-foreground italic">
                     &quot;{transcript}&quot;
                   </span>
                 )}
@@ -942,7 +1086,20 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
           )}
         </div>
 
-        <div className="flex-1 space-y-2">
+        <div className="flex-1 space-y-3">
+          {/* Headphones Advisory Banner */}
+          <div className="flex items-start gap-2.5 rounded-lg border border-primary/20 bg-primary/5 p-2.5 text-xs">
+            <Headphones className="h-4 w-4 shrink-0 text-primary mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-semibold text-foreground">
+                🎧 Using headphones or earbuds is highly recommended for the best conversation experience
+              </p>
+              <p className="text-muted-foreground leading-normal">
+                Wearing earbuds or headphones prevents speaker audio from leaking into your microphone, eliminating acoustic feedback and guaranteeing the AI hears your voice accurately.
+              </p>
+            </div>
+          </div>
+
           <p className="text-sm font-medium">
             Test your speaker and microphone to ensure audio is working
             properly.
@@ -1239,6 +1396,7 @@ export function IntervieweeOnboarding({
   chatEnabled = false,
   aiName = "AI Interviewer",
   questionTypes = [],
+  sessionId,
   onComplete,
 }: IntervieweeOnboardingProps) {
   const [step, setStep] = useState<OnboardingStep>("info");
@@ -1258,10 +1416,9 @@ export function IntervieweeOnboarding({
 
   const header = (
     <header className="sticky top-0 z-50 flex h-14 items-center border-b bg-card px-4 sm:px-6">
-      <div className="flex items-center gap-1">
-        <AuralLogo size={28} className="shrink-0" />
-        <span className="font-heading text-base font-bold tracking-[2px]">AURAL</span>
-      </div>
+        <div className="flex items-center gap-2">
+          <TrovenLogo size={28} variant="full" className="h-7 w-auto" />
+        </div>
     </header>
   );
 
@@ -1425,7 +1582,7 @@ export function IntervieweeOnboarding({
               interviewContext={mockContext}
               durationMinutes={timeLimitMinutes ?? undefined}
               chatEnabled={chatEnabled}
-              onComplete={() => {}}
+              onComplete={() => { }}
               preview
             />
           ) : (
@@ -1443,7 +1600,7 @@ export function IntervieweeOnboarding({
                 })),
               }}
               durationMinutes={timeLimitMinutes ?? undefined}
-              onComplete={() => {}}
+              onComplete={() => { }}
               preview
             />
           )}
@@ -1458,7 +1615,7 @@ export function IntervieweeOnboarding({
       {header}
       <StepIndicator current="checklist" />
       <div className="mx-auto w-full max-w-2xl flex-1 space-y-4 px-4 pb-8">
-        <CameraCheck done={cameraDone} onDone={() => setCameraDone(true)} allowSkip={!antiCheatingEnabled} />
+        <CameraCheck done={cameraDone} onDone={() => setCameraDone(true)} allowSkip={!antiCheatingEnabled} sessionId={sessionId} />
         <MicCheck done={micDone} onDone={() => setMicDone(true)} language={language} allowSkip={!antiCheatingEnabled} />
         <ScreenCheck done={screenDone} onDone={() => setScreenDone(true)} allowSkip={!antiCheatingEnabled} />
 

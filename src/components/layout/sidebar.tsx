@@ -6,38 +6,38 @@ import { TourCelebration } from "@/components/tour/tour-celebration";
 import { TourOverlay } from "@/components/tour/tour-overlay";
 import { TourProvider } from "@/components/tour/tour-provider";
 import { TourWelcome } from "@/components/tour/tour-welcome";
-import { AuralLogo } from "@/components/ui/aural-logo";
+import { TrovenLogo } from "@/components/ui/aural-logo";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import {
-    ArrowUpRight,
-    ChevronUp,
-    FolderKanban,
-    Gauge,
-    HelpCircle,
-    LayoutDashboard,
-    LifeBuoy,
-    Loader2,
-    LogOut,
-    MessageSquare,
-    Monitor,
-    Moon,
-    Palette,
-    PanelLeftClose,
-    PanelLeftOpen,
-    PlayCircle,
-    Plus,
-    Settings,
-    Sun
+  ArrowUpRight,
+  ChevronUp,
+  FolderKanban,
+  Gauge,
+  HelpCircle,
+  LayoutDashboard,
+  LifeBuoy,
+  Loader2,
+  LogOut,
+  MessageSquare,
+  Monitor,
+  Moon,
+  Palette,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PlayCircle,
+  Plus,
+  Settings,
+  Sun
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import Link from "next/link";
@@ -190,12 +190,11 @@ export function Sidebar({
     >
       {/* Logo */}
       <div className="flex h-14 items-center border-b px-4">
-        <Link href="/organizations" className="flex items-center gap-1">
-          <AuralLogo size={28} className="shrink-0" />
-          {!collapsed && (
-            <span className="font-heading text-base font-bold tracking-[2px]">
-              AURAL
-            </span>
+        <Link href="/organizations" className="flex items-center gap-2">
+          {collapsed ? (
+            <TrovenLogo size={28} className="shrink-0" />
+          ) : (
+            <TrovenLogo size={28} variant="full" className="h-7 w-auto" />
           )}
         </Link>
       </div>
@@ -385,7 +384,7 @@ export function Sidebar({
                   // Session may have expired; clear local state instead
                   await supabase.auth
                     .signOut({ scope: "local" })
-                    .catch(() => {});
+                    .catch(() => { });
                 }
                 window.location.href = "/login";
               }}
@@ -438,21 +437,21 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         <Sidebar
           collapsed={collapsed}
           onToggle={() => setCollapsed(!collapsed)}
+        />
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <Header
+            sidebarToggle={
+              <SidebarToggle
+                collapsed={collapsed}
+                onToggle={() => setCollapsed(!collapsed)}
+              />
+            }
           />
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <Header
-              sidebarToggle={
-                <SidebarToggle
-                  collapsed={collapsed}
-                  onToggle={() => setCollapsed(!collapsed)}
-                />
-              }
-            />
-            <main className="flex-1 overflow-y-auto p-6 code-scrollbar">
-              {children}
-            </main>
-          </div>
+          <main className="flex-1 overflow-y-auto p-6 code-scrollbar">
+            {children}
+          </main>
         </div>
+      </div>
       <TourOverlay />
       <TourWelcome />
       <TourCelebration />

@@ -44,21 +44,26 @@ import {
   Mic,
   Monitor,
   PenLine,
+  Play,
   Search,
   SmilePlus,
   Sparkles,
   Tags,
   Target,
+  Trash2,
   UserCheck,
   Users,
+  Video,
   Volume2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 interface QuestionEvaluation {
   question: string;
   score: number;
   evaluation: string;
+  status?: string;
+  evidence?: string;
   highlights?: string[];
   improvements?: string[];
 }
@@ -199,10 +204,19 @@ function SessionDetail({
 }) {
   const { toast } = useToast();
   const { currentOrg } = useOrg();
+  const utils = trpc.useUtils();
   const summary = trpc.analysis.getSessionSummary.useQuery({ sessionId });
   const completeSession = trpc.session.complete.useMutation();
+  const deleteSessionMutation = trpc.session.deleteMany.useMutation({
+    onSuccess: () => {
+      utils.session.listByInterview.invalidate();
+      utils.candidate.list.invalidate();
+      utils.analysis.getInterviewInsights.invalidate();
+    },
+  });
   const [generating, setGenerating] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [pdfCapture, setPdfCapture] = useState(false);
@@ -214,6 +228,31 @@ function SessionDetail({
   const [exportProgress, setExportProgress] = useState("");
   const [exportPercent, setExportPercent] = useState(0);
   const reportRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  const videoUrl =
+    (summary.data?.insights as Record<string, unknown> | null)?.videoRecordingUrl as string | undefined;
+
+  const firstMsgTime = useMemo(() => {
+    const msgs = summary.data?.messages;
+    if (!msgs || msgs.length === 0) return null;
+    const first = msgs[0]?.timestamp;
+    return first ? new Date(first).getTime() : null;
+  }, [summary.data?.messages]);
+
+  const jumpToVideo = useCallback((seconds: number) => {
+    if (videoRef.current) {
+      videoRef.current.currentTime = Math.max(0, seconds);
+      videoRef.current.play().catch(() => {});
+      videoRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, []);
+
+  const formatVideoTime = useCallback((totalSeconds: number): string => {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = Math.floor(totalSeconds % 60);
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }, []);
 
   const handleGenerateSummary = useCallback(async () => {
     setGenerating(true);
@@ -424,6 +463,51 @@ function SessionDetail({
   const questionEvaluations: QuestionEvaluation[] = Array.isArray(insightsData)
     ? []
     : (insightsData?.questionEvaluations ?? []);
+
+  const getQuestionTimestampOffset = useCallback(
+    (qe: QuestionEvaluation, index: number): number | null => {
+      const msgs = summary.data?.messages;
+      if (!msgs || msgs.length === 0 || !firstMsgTime) return null;
+
+      const cleanQ = (qe.question || "").toLowerCase().replace(/[^a-z0-9\s]/g, "");
+      const qWords = cleanQ.split(/\s+/).filter((w) => w.length > 3);
+
+      let bestMsg: any = null;
+      let bestScore = 0;
+      for (const m of msgs) {
+        if (m.role === "ASSISTANT") {
+          const cleanContent = (m.content || "").toLowerCase();
+          let matchCount = 0;
+          for (const w of qWords) {
+            if (cleanContent.includes(w)) matchCount++;
+          }
+          if (matchCount > bestScore && (matchCount >= 2 || (qWords.length <= 2 && matchCount >= 1))) {
+            bestScore = matchCount;
+            bestMsg = m;
+          }
+        }
+      }
+
+      if (bestMsg?.timestamp) {
+        return Math.max(0, Math.floor((new Date(bestMsg.timestamp).getTime() - firstMsgTime) / 1000));
+      }
+
+      const assistantMsgs = msgs.filter((m: any) => m.role === "ASSISTANT");
+      if (assistantMsgs.length > 0) {
+        const targetIdx = Math.min(
+          Math.floor((index / Math.max(1, questionEvaluations.length)) * assistantMsgs.length),
+          assistantMsgs.length - 1
+        );
+        const target = assistantMsgs[targetIdx];
+        if (target?.timestamp) {
+          return Math.max(0, Math.floor((new Date(target.timestamp).getTime() - firstMsgTime) / 1000));
+        }
+      }
+
+      return null;
+    },
+    [summary.data?.messages, firstMsgTime, questionEvaluations.length]
+  );
   const researchFindings: ResearchFinding[] = Array.isArray(insightsData)
     ? []
     : (insightsData?.researchFindings ?? []);
@@ -466,29 +550,44 @@ function SessionDetail({
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to Results
         </Button>
-        {hasReport && (
+        <div className="flex items-center gap-2">
+          {hasReport && (
+            <Button
+              variant="outline"
+              onClick={handleExportPDF}
+              disabled={exporting}
+              className="relative overflow-hidden"
+            >
+              {exporting && (
+                <div
+                  className="absolute inset-0 bg-primary/10 transition-all duration-300 ease-out"
+                  style={{ width: `${exportPercent}%` }}
+                />
+              )}
+              <span className="relative flex items-center">
+                {exporting ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <FileDown className="mr-2 h-4 w-4" />
+                )}
+                {exporting ? exportProgress || "Exporting..." : "Export PDF"}
+              </span>
+            </Button>
+          )}
           <Button
             variant="outline"
-            onClick={handleExportPDF}
-            disabled={exporting}
-            className="relative overflow-hidden"
+            className="border-destructive/40 text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
+            onClick={() => setShowDeleteConfirm(true)}
+            disabled={deleteSessionMutation.isLoading}
           >
-            {exporting && (
-              <div
-                className="absolute inset-0 bg-primary/10 transition-all duration-300 ease-out"
-                style={{ width: `${exportPercent}%` }}
-              />
+            {deleteSessionMutation.isLoading ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="mr-2 h-4 w-4" />
             )}
-            <span className="relative flex items-center">
-              {exporting ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <FileDown className="mr-2 h-4 w-4" />
-              )}
-              {exporting ? exportProgress || "Exporting..." : "Export PDF"}
-            </span>
+            Delete Session
           </Button>
-        )}
+        </div>
       </div>
 
       {summary.isLoading ? (
@@ -709,6 +808,33 @@ function SessionDetail({
               </Card>
             )}
 
+            {/* Full Video Recording — positioned prominently at top */}
+            {(() => {
+              const videoUrl =
+                (summary.data?.insights as Record<string, unknown> | null)?.videoRecordingUrl as string | undefined;
+              if (!videoUrl) return null;
+              return (
+                <Card className="border-primary/30 shadow-sm">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-primary">
+                      <Video className="h-4 w-4" />
+                      Interview Video Recording
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <video
+                      ref={videoRef}
+                      controls
+                      playsInline
+                      preload="auto"
+                      src={videoUrl}
+                      className="w-full rounded-lg max-h-[500px] bg-black shadow-inner"
+                    />
+                  </CardContent>
+                </Card>
+              );
+            })()}
+
             {/* Per-Question Evaluations */}
             {questionEvaluations.length > 0 && (
               <Card>
@@ -724,16 +850,43 @@ function SessionDetail({
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex-1">
                           <p className="text-sm font-medium">
-                            Q{i + 1}. {qe.question}
+                            Topic {i + 1}. {qe.question}
                           </p>
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
+                          {(() => {
+                            const offset = getQuestionTimestampOffset(qe, i);
+                            if (!videoUrl || offset == null) return null;
+                            return (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => jumpToVideo(offset)}
+                                className="h-7 gap-1 text-xs text-primary border-primary/30 hover:bg-primary/10"
+                                title="Jump to this question in video recording"
+                              >
+                                <Play className="h-3 w-3 fill-current" />
+                                Play Clip ({formatVideoTime(offset)})
+                              </Button>
+                            );
+                          })()}
+                          {qe.status === "NO_RESPONSE" || qe.score === 0 ? (
+                            <Badge variant="outline" className="text-xs text-muted-foreground">
+                              No Response
+                            </Badge>
+                          ) : null}
                           <span className="text-lg font-bold">
                             {qe.score}/10
                           </span>
                         </div>
                       </div>
                       <Progress value={(qe.score || 0) * 10} className="h-2" />
+                      {qe.evidence && qe.status !== "NO_RESPONSE" && (
+                        <div className="rounded bg-muted/50 p-2.5 text-xs text-muted-foreground border-l-2 border-primary">
+                          <span className="font-semibold text-foreground">Candidate Evidence: </span>
+                          <span className="italic">&ldquo;{qe.evidence}&rdquo;</span>
+                        </div>
+                      )}
                       <p className="text-sm text-muted-foreground">
                         {qe.evaluation}
                       </p>
@@ -1099,7 +1252,25 @@ function SessionDetail({
                                   ? "External paste blocked"
                                   : v.type === "multi_screen"
                                     ? "Multi-screen detected"
-                                    : v.type;
+                                    : v.type === "face_missing"
+                                      ? "Face absent from camera"
+                                      : v.type === "face_restored"
+                                        ? "Face returned"
+                                        : v.type === "face_mismatch"
+                                          ? "Face identity mismatch (different person on camera)"
+                                        : v.type === "looking_away"
+                                          ? "Looking away from screen"
+                                          : v.type === "lip_sync_mismatch"
+                                            ? "Lip-sync anomaly (audio without mouth motion)"
+                                            : v.type === "multiple_faces"
+                                              ? "Multiple people in frame"
+                                              : v.type === "no_blinking"
+                                                ? "Unnatural blink freeze (possible deepfake)"
+                                                : v.type === "hand_wave_verified"
+                                                  ? "Hand-wave liveness verified"
+                                                  : v.type === "virtual_device_detected"
+                                                    ? "Virtual audio driver detected"
+                                                    : v.type;
                         counts[label] = (counts[label] || 0) + 1;
                       }
                       return Object.entries(counts).map(([label, count]) => (
@@ -1401,13 +1572,30 @@ function SessionDetail({
                                       <span
                                         className={`text-[10px] ${isUser ? "text-primary-foreground/60" : "text-secondary-600 dark:text-secondary-400"}`}
                                       >
-                                        {new Date(
-                                          msg.timestamp,
-                                        ).toLocaleTimeString(undefined, {
-                                          hour: "2-digit",
-                                          minute: "2-digit",
-                                          second: "2-digit",
-                                        })}
+                                        {videoUrl && firstMsgTime ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const offset = Math.max(0, Math.floor((new Date(msg.timestamp).getTime() - firstMsgTime) / 1000));
+                                              jumpToVideo(offset);
+                                            }}
+                                            className={`inline-flex items-center gap-1 font-mono text-[10px] hover:underline cursor-pointer ${
+                                              isUser ? "text-primary-foreground/90 hover:text-white" : "text-primary hover:text-primary/80"
+                                            }`}
+                                            title="Jump video to this message"
+                                          >
+                                            <Play className="h-2.5 w-2.5 fill-current" />
+                                            {formatVideoTime(Math.max(0, Math.floor((new Date(msg.timestamp).getTime() - firstMsgTime) / 1000)))}
+                                          </button>
+                                        ) : (
+                                          new Date(
+                                            msg.timestamp,
+                                          ).toLocaleTimeString(undefined, {
+                                            hour: "2-digit",
+                                            minute: "2-digit",
+                                            second: "2-digit",
+                                          })
+                                        )}
                                       </span>
                                     </div>
                                     <p className="text-sm leading-relaxed">
@@ -1504,6 +1692,55 @@ function SessionDetail({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmEndAndGenerate}>
               End Interview & Generate
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete session confirmation dialog */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Interview Session</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this session for{" "}
+              <strong>
+                {summary.data?.participantName ||
+                  summary.data?.participantEmail ||
+                  "this candidate"}
+              </strong>
+              ? All interview messages, proctoring violations, scores, and video recordings will be permanently removed.
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteSessionMutation.isLoading}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteSessionMutation.isLoading}
+              onClick={async (e) => {
+                e.preventDefault();
+                try {
+                  await deleteSessionMutation.mutateAsync({ ids: [sessionId] });
+                  toast({ title: "Session deleted successfully" });
+                  setShowDeleteConfirm(false);
+                  onBack();
+                } catch (err: any) {
+                  toast({
+                    title: "Failed to delete session",
+                    description: err.message,
+                    variant: "destructive",
+                  });
+                }
+              }}
+            >
+              {deleteSessionMutation.isLoading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                "Delete"
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

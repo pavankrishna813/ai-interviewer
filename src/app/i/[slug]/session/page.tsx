@@ -107,6 +107,7 @@ export default function SlugSessionPage() {
         voiceEnabled={!!interview.data.voiceEnabled}
         chatEnabled={!!interview.data.chatEnabled}
         aiName={interview.data.aiName}
+        sessionId={sessionId ?? undefined}
         questionTypes={interview.data.questions.map((q: any) => q.type as string)}
         onComplete={() => setOnboardingDone(true)}
       />
@@ -233,6 +234,7 @@ export default function SlugSessionPage() {
           chatEnabled={!!interview.data.chatEnabled}
           onComplete={handleComplete}
           videoMode={isPreview ? false : !!interview.data.videoEnabled}
+          antiCheatingEnabled={antiCheatingEnabled}
         />
       </>
     );

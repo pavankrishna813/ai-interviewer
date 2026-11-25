@@ -19,8 +19,8 @@ const config: Config = {
     },
     extend: {
       fontFamily: {
-        heading: ["var(--font-heading)", "system-ui", "sans-serif"],
-        body: ["var(--font-body)", "system-ui", "sans-serif"],
+        heading: ["'Outfit'", "var(--font-heading)", "system-ui", "sans-serif"],
+        body: ["'Outfit'", "var(--font-body)", "system-ui", "sans-serif"],
       },
       colors: {
         mk: {
@@ -29,7 +29,7 @@ const config: Config = {
           dark: "#1a1a1a",
           "dark-surface": "#2a2a2a",
           border: "#D1CCC4",
-          terracotta: "#C05A3C",
+          terracotta: "#0B5ED7",
           success: "#4A7C59",
           info: "#5C7C8A",
           text: "#1a1a1a",
@@ -45,16 +45,16 @@ const config: Config = {
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
-          50: "#FEF5F3",
-          100: "#FDE8E3",
-          200: "#FBCEC3",
-          300: "#F6AB99",
-          400: "#E8826A",
-          500: "#C05A3C",
-          600: "#A44B32",
-          700: "#883D29",
-          800: "#6E3221",
-          900: "#5A291B",
+          50: "#E7F0FE",
+          100: "#CFE1FC",
+          200: "#9EC3FA",
+          300: "#6EA5F7",
+          400: "#3481F4",
+          500: "#0B5ED7",
+          600: "#0A4FB8",
+          700: "#08439B",
+          800: "#063479",
+          900: "#052657",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
@@ -116,7 +116,7 @@ const config: Config = {
         },
         brand: {
           sand: "#F5F2EB",
-          terracotta: "#C05A3C",
+          terracotta: "#0B5ED7",
           amber: "#FFBF00",
           charcoal: "#333333",
         },

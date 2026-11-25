@@ -28,23 +28,29 @@ interface UseInterviewRecordingOptions {
 }
 
 /**
- * Resolve the actual playable duration of a WebM audio blob.
+ * Resolve the actual playable duration of a WebM audio or video blob.
  * WebM files from MediaRecorder often have Infinity/missing duration;
  * the seek-to-end trick forces the browser to compute it.
  */
-function resolveBlobDuration(blob: Blob): Promise<number | undefined> {
+function resolveBlobDuration(blob: Blob, isVideo = false): Promise<number | undefined> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob);
-    const audio = new Audio();
+    const media: HTMLMediaElement = isVideo
+      ? document.createElement("video")
+      : new Audio();
     let resolved = false;
     const timeout = setTimeout(() => {
-      if (!resolved) { resolved = true; cleanup(); resolve(undefined); }
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve(undefined);
+      }
     }, 5000);
 
     function cleanup() {
       clearTimeout(timeout);
-      audio.removeAttribute("src");
-      audio.load();
+      media.removeAttribute("src");
+      media.load();
       URL.revokeObjectURL(url);
     }
 
@@ -55,22 +61,28 @@ function resolveBlobDuration(blob: Blob): Promise<number | undefined> {
       resolve(Math.round(dur));
     }
 
-    audio.addEventListener("durationchange", () => {
-      if (audio.duration && isFinite(audio.duration)) {
-        finish(audio.duration);
+    media.addEventListener("durationchange", () => {
+      if (media.duration && isFinite(media.duration) && media.duration > 0) {
+        finish(media.duration);
       }
     });
 
-    audio.addEventListener("loadedmetadata", () => {
-      if (audio.duration && isFinite(audio.duration)) {
-        finish(audio.duration);
+    media.addEventListener("loadedmetadata", () => {
+      if (media.duration && isFinite(media.duration) && media.duration > 0) {
+        finish(media.duration);
       } else {
-        audio.currentTime = 1e10;
+        media.currentTime = 1e10;
       }
     });
 
-    audio.preload = "auto";
-    audio.src = url;
+    media.addEventListener("timeupdate", () => {
+      if (media.duration && isFinite(media.duration) && media.duration > 0) {
+        finish(media.duration);
+      }
+    });
+
+    media.preload = "auto";
+    media.src = url;
   });
 }
 
@@ -97,6 +109,8 @@ export function useInterviewRecording({
   // Refs for recording infrastructure
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const videoRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoChunksRef = useRef<Blob[]>([]);
   const audioMimeRef = useRef<string>("");
   const mixCtxRef = useRef<AudioContext | null>(null);
   const mixDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
@@ -110,6 +124,9 @@ export function useInterviewRecording({
   const stoppedRef = useRef(false);
   const ttsPlayTimeRef = useRef(0);
   const ttsSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const recordingStartTimeRef = useRef<number>(0);
+  const videoStartTimeRef = useRef<number>(0);
+  const audioClockCarrierRef = useRef<{ osc: OscillatorNode; gain: GainNode } | null>(null);
 
   // Keep refs in sync with state
   useEffect(() => { cameraStreamRef.current = cameraStream; }, [cameraStream]);
@@ -172,9 +189,17 @@ export function useInterviewRecording({
     // Disconnect previous mic source if any
     try { micSourceRef.current?.disconnect(); } catch { /* noop */ }
 
-    const source = ctx.createMediaStreamSource(micStream);
-    source.connect(mixDestRef.current);
-    micSourceRef.current = source;
+    try {
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => {});
+      }
+      const source = ctx.createMediaStreamSource(micStream);
+      source.connect(mixDestRef.current);
+      micSourceRef.current = source;
+      log.info("Mic stream connected to recording mixer");
+    } catch (err) {
+      log.error("Failed to connect mic stream to recording mixer:", err);
+    }
   }, []);
 
   /**
@@ -235,6 +260,20 @@ export function useInterviewRecording({
       }
       ctx2d.drawImage(video, 0, 0);
 
+      // Ensure camera snapshots always capture a visible face
+      if (type === "camera") {
+        try {
+          const { detectFace } = await import("@/lib/proctor/face-check");
+          const faceCheck = await detectFace(canvas);
+          if (!faceCheck.hasFace) {
+            log.warn("Periodic camera snapshot skipped: No face detected in frame", faceCheck.reason);
+            return;
+          }
+        } catch (err) {
+          log.warn("Snapshot face check skipped on error:", err);
+        }
+      }
+
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob((b) => resolve(b), "image/jpeg", 0.7),
       );
@@ -288,37 +327,12 @@ export function useInterviewRecording({
       if (!enabled || isRecording) return;
       stoppedRef.current = false;
       ttsPlayTimeRef.current = 0;
+      recordingStartTimeRef.current = Date.now();
 
-      // Create mixing AudioContext and destination
-      const ctx = new AudioContext();
-      mixCtxRef.current = ctx;
-      const dest = ctx.createMediaStreamDestination();
-      mixDestRef.current = dest;
-
-      // Attach mic if provided
-      if (micStream) {
-        attachMicStream(micStream);
-      }
-
-      // Start MediaRecorder — prefer MP4/AAC (iOS-compatible) with WebM fallback
-      chunksRef.current = [];
-      const preferredMime = ["audio/mp4", "audio/mp4;codecs=aac", "audio/webm;codecs=opus", "audio/webm"]
-        .find((m) => MediaRecorder.isTypeSupported(m)) ?? "";
-      audioMimeRef.current = preferredMime;
-      log.info("Recording MIME:", preferredMime || "(default)");
-      const recorder = new MediaRecorder(dest.stream, {
-        ...(preferredMime ? { mimeType: preferredMime } : {}),
-      });
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-      recorder.start(5000); // collect chunks every 5s
-      recorderRef.current = recorder;
-
-      // Acquire camera + screen
+      // 1. Acquire camera + screen FIRST so video hardware is active and buffered
       await acquireStreams();
 
-      // Set up hidden video elements for screenshot capture
+      // 2. Set up hidden video elements for screenshot capture
       if (!cameraVideoRef.current) {
         const v = document.createElement("video");
         v.muted = true;
@@ -343,18 +357,100 @@ export function useInterviewRecording({
           video.play().catch(() => {});
         }
       };
-      // Use refs (set in acquireStreams via state update + useEffect sync)
-      // Small delay to let state sync
-      setTimeout(() => {
-        bindStream(cameraVideoRef.current!, cameraStreamRef.current);
-        bindStream(screenVideoRef.current!, screenStreamRef.current);
-      }, 500);
+      bindStream(cameraVideoRef.current!, cameraStreamRef.current);
+      bindStream(screenVideoRef.current!, screenStreamRef.current);
+
+      // 3. Create mixing AudioContext and destination in lockstep with video
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioCtx();
+      if (ctx.state === "suspended") {
+        try {
+          await ctx.resume();
+        } catch (e) {
+          log.warn("AudioContext resume failed:", e);
+        }
+      }
+      mixCtxRef.current = ctx;
+      const dest = ctx.createMediaStreamDestination();
+      mixDestRef.current = dest;
+
+      // 4. Attach micStream immediately to the mixer
+      if (micStream && micStream.getAudioTracks().length > 0) {
+        attachMicStream(micStream);
+      }
+
+      // 5. Keep WebAudio clock generating continuous frames from timestamp 0.000s
+      // by attaching an inaudible carrier:
+      try {
+        const osc = ctx.createOscillator();
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0.00001; // virtually silent, guarantees constant audio packet flow
+        osc.connect(silentGain);
+        silentGain.connect(dest);
+        osc.start();
+        audioClockCarrierRef.current = { osc, gain: silentGain };
+      } catch (oscErr) {
+        log.warn("Failed to start audio clock carrier:", oscErr);
+      }
+
+      // 6. Start MediaRecorder (audio) and VideoRecorder in lockstep at the same timestamp
+      chunksRef.current = [];
+      const preferredMime = ["audio/mp4", "audio/mp4;codecs=aac", "audio/webm;codecs=opus", "audio/webm"]
+        .find((m) => MediaRecorder.isTypeSupported(m)) ?? "";
+      audioMimeRef.current = preferredMime;
+      try {
+        const recorder = new MediaRecorder(dest.stream, {
+          ...(preferredMime ? { mimeType: preferredMime } : {}),
+        });
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunksRef.current.push(e.data);
+        };
+        recorder.start(1000); // 1s timeslices
+        recorderRef.current = recorder;
+      } catch (aErr) {
+        log.error("Failed to start audio recorder:", aErr);
+      }
+
+      // Start video recorder IMMEDIATELY synchronized with the audio mixer
+      const videoTrack =
+        cameraStreamRef.current?.getVideoTracks()[0] ||
+        screenStreamRef.current?.getVideoTracks()[0];
+
+      if (videoTrack && mixDestRef.current) {
+        try {
+          const combinedStream = new MediaStream([
+            ...mixDestRef.current.stream.getAudioTracks(),
+            videoTrack,
+          ]);
+          const preferredVideoMime = [
+            "video/webm;codecs=vp8,opus",
+            "video/webm;codecs=vp9,opus",
+            "video/webm",
+            "video/mp4",
+          ].find((m) => MediaRecorder.isTypeSupported(m)) ?? "";
+
+          videoChunksRef.current = [];
+          const videoRec = new MediaRecorder(combinedStream, {
+            ...(preferredVideoMime ? { mimeType: preferredVideoMime } : {}),
+            videoBitsPerSecond: 1_000_000,
+          });
+          videoRec.ondataavailable = (e) => {
+            if (e.data.size > 0) videoChunksRef.current.push(e.data);
+          };
+          videoRec.start(1000); // 1s timeslices for precise keyframes and lip sync
+          videoRecorderRef.current = videoRec;
+          videoStartTimeRef.current = Date.now();
+          log.info("Synchronized full video recorder started with MIME:", preferredVideoMime);
+        } catch (vErr) {
+          log.error("Failed to start video recorder:", vErr);
+        }
+      }
 
       // Start periodic screenshot timer
       screenshotTimerRef.current = setInterval(takeScreenshots, screenshotIntervalMs);
 
       setIsRecording(true);
-      log.info("Started");
+      log.info("Synchronized recording session started");
     },
     [enabled, isRecording, acquireStreams, attachMicStream, takeScreenshots, screenshotIntervalMs],
   );
@@ -365,6 +461,7 @@ export function useInterviewRecording({
    */
   const stop = useCallback(async (): Promise<{
     audioUrl?: string;
+    videoUrl?: string;
     audioDuration?: number;
     screenshots: ScreenshotEntry[];
   }> => {
@@ -382,60 +479,153 @@ export function useInterviewRecording({
     // Take one final set of screenshots
     takeScreenshots();
 
-    // Stop MediaRecorder and collect audio
+    // Stop MediaRecorder (audio) and VideoRecorder in parallel
     let audioUrl: string | undefined;
+    let videoUrl: string | undefined;
     let audioDuration: number | undefined;
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      await new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
-        recorder.stop();
-      });
 
+    const stopAudioPromise = new Promise<Blob | null>((resolve) => {
+      const recorder = recorderRef.current;
+      if (!recorder || recorder.state === "inactive") return resolve(null);
+      recorder.onstop = () => {
+        const mime = audioMimeRef.current || "audio/webm";
+        const rawBlob = new Blob(chunksRef.current, { type: mime });
+        resolve(rawBlob.size > 0 ? rawBlob : null);
+      };
+      try {
+        recorder.stop();
+      } catch {
+        resolve(null);
+      }
+    });
+
+    const stopVideoPromise = new Promise<Blob | null>((resolve) => {
+      const vRecorder = videoRecorderRef.current;
+      if (!vRecorder || vRecorder.state === "inactive") return resolve(null);
+      vRecorder.onstop = () => {
+        const rawVideoBlob = new Blob(videoChunksRef.current, { type: "video/webm" });
+        resolve(rawVideoBlob.size > 0 ? rawVideoBlob : null);
+      };
+      try {
+        vRecorder.stop();
+      } catch {
+        resolve(null);
+      }
+    });
+
+    const [rawAudioBlob, rawVideoBlob] = await Promise.all([
+      stopAudioPromise,
+      stopVideoPromise,
+    ]);
+
+    // Process and upload audio and video in parallel for speed
+    const uploadAudioTask = (async () => {
+      if (!rawAudioBlob) return;
       const mime = audioMimeRef.current || "audio/webm";
       const isWebm = mime.includes("webm");
       const ext = isWebm ? "webm" : "m4a";
-      const rawBlob = new Blob(chunksRef.current, { type: mime });
-      if (rawBlob.size > 0) {
-        audioDuration = await resolveBlobDuration(rawBlob);
 
-        // Patch WebM container with correct duration so players can display it
-        const audioBlob = (isWebm && audioDuration)
-          ? await fixWebmDuration(rawBlob, audioDuration * 1000)
-          : rawBlob;
+      audioDuration = await resolveBlobDuration(rawAudioBlob);
+      const audioBlob =
+        isWebm && audioDuration
+          ? await fixWebmDuration(rawAudioBlob, audioDuration * 1000)
+          : rawAudioBlob;
 
-        try {
-          const fname = `recording-${Date.now()}.${ext}`;
-          const form = new FormData();
-          form.append("file", audioBlob, fname);
-          form.append("sessionId", sessionId);
-          form.append("type", "recording");
-          form.append("filename", fname);
+      try {
+        const fname = `recording-${Date.now()}.${ext}`;
+        const form = new FormData();
+        form.append("file", audioBlob, fname);
+        form.append("sessionId", sessionId);
+        form.append("type", "recording");
+        form.append("filename", fname);
 
-          const res = await fetch("/api/session/upload", {
-            method: "POST",
-            body: form,
-          });
-          if (res.ok) {
-            const data = await res.json();
-            audioUrl = data.url;
-            log.info("Audio uploaded:", audioUrl);
-          }
-        } catch (err) {
-          log.error("Audio upload failed:", err);
+        const res = await fetch("/api/session/upload", {
+          method: "POST",
+          body: form,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          audioUrl = data.url;
+          log.info("Audio uploaded successfully:", audioUrl);
+        } else {
+          log.error("Audio upload failed HTTP status:", res.status);
         }
+      } catch (err) {
+        log.error("Audio upload network exception:", err);
       }
-    }
+    })();
+
+    const uploadVideoTask = (async () => {
+      if (!rawVideoBlob) return;
+      try {
+        const isWebm = rawVideoBlob.type.includes("webm") || !rawVideoBlob.type;
+        const ext = isWebm ? "webm" : "mp4";
+        const fname = `video-${Date.now()}.${ext}`;
+
+        let finalVideoBlob = rawVideoBlob;
+        if (isWebm) {
+          // Resolve duration via seek trick or fall back to recorded wall-clock time
+          const resolvedDur = await resolveBlobDuration(rawVideoBlob, true);
+          const wallClockDuration = videoStartTimeRef.current > 0
+            ? (Date.now() - videoStartTimeRef.current) / 1000
+            : (Date.now() - recordingStartTimeRef.current) / 1000;
+          const targetDurationSec = (resolvedDur && isFinite(resolvedDur) && resolvedDur > 0)
+            ? resolvedDur
+            : wallClockDuration;
+
+          if (targetDurationSec > 0) {
+            try {
+              finalVideoBlob = await fixWebmDuration(rawVideoBlob, Math.round(targetDurationSec * 1000));
+              log.info("Fixed WebM video duration successfully:", targetDurationSec, "seconds");
+            } catch (fixErr) {
+              log.warn("fixWebmDuration failed for video, using raw blob:", fixErr);
+            }
+          }
+        }
+
+        const form = new FormData();
+        form.append("file", finalVideoBlob, fname);
+        form.append("sessionId", sessionId);
+        form.append("type", "video");
+        form.append("filename", fname);
+
+        const res = await fetch("/api/session/upload", {
+          method: "POST",
+          body: form,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          videoUrl = data.url;
+          log.info("Video recording uploaded successfully:", videoUrl);
+        } else {
+          const errText = await res.text();
+          log.error("Video upload failed HTTP status:", res.status, errText);
+        }
+      } catch (err) {
+        log.error("Video upload network exception:", err);
+      }
+    })();
+
+    await Promise.allSettled([uploadAudioTask, uploadVideoTask]);
 
     // Disconnect mic source
     try { micSourceRef.current?.disconnect(); } catch { /* noop */ }
     micSourceRef.current = null;
+
+    // Stop and disconnect continuous carrier oscillator
+    try {
+      audioClockCarrierRef.current?.osc.stop();
+      audioClockCarrierRef.current?.osc.disconnect();
+      audioClockCarrierRef.current?.gain.disconnect();
+    } catch { /* noop */ }
+    audioClockCarrierRef.current = null;
 
     // Close mix context
     try { mixCtxRef.current?.close(); } catch { /* noop */ }
     mixCtxRef.current = null;
     mixDestRef.current = null;
     recorderRef.current = null;
+    videoRecorderRef.current = null;
 
     // Stop camera/screen tracks
     cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -460,6 +650,7 @@ export function useInterviewRecording({
 
     return {
       audioUrl,
+      videoUrl,
       audioDuration,
       screenshots: screenshotsRef.current,
     };

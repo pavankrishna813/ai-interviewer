@@ -37,9 +37,15 @@ export function useAntiCheating({
   useEffect(() => {
     if (!enabled) return;
 
+    // Grace period of 10 seconds after mounting to allow camera/mic/screen share permission prompts
+    const mountTime = Date.now();
+    const GRACE_PERIOD_MS = 10_000;
     let blurTimer: ReturnType<typeof setTimeout> | null = null;
 
     const recordDeparture = () => {
+      // Don't flag departures during initial permission prompts or setup
+      if (Date.now() - mountTime < GRACE_PERIOD_MS) return;
+
       setDepartureCount((prev) => prev + 1);
       addViolation({
         type: "page_departure",
@@ -58,10 +64,14 @@ export function useAntiCheating({
     };
 
     const handleBlur = () => {
+      // Only count blur if the document is actually hidden (tab switched / minimized)
+      // Avoids false alarms when browser permission prompts, system dialogs, or screen share controls take focus
       blurTimer = setTimeout(() => {
         blurTimer = null;
-        recordDeparture();
-      }, 200);
+        if (document.hidden) {
+          recordDeparture();
+        }
+      }, 1000);
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -153,8 +163,9 @@ export function useAntiCheating({
     const checkScreens = () => {
       if (typeof window === "undefined") return;
 
-      const screen = window.screen as Screen & { availLeft?: number };
+      const screen = window.screen as Screen & { availLeft?: number; isExtended?: boolean };
       const hasMultiple =
+        screen.isExtended === true ||
         screen.availWidth > screen.width ||
         (screen.availLeft !== undefined && screen.availLeft !== 0);
 
@@ -168,26 +179,7 @@ export function useAntiCheating({
       }
     };
 
-    const screenDetails = (window as unknown as { getScreenDetails?: () => Promise<{ screens: unknown[] }> })
-      .getScreenDetails;
-    if (screenDetails) {
-      screenDetails()
-        .then((details) => {
-          if (details.screens.length > 1) {
-            setMultiScreenDetected(true);
-            addViolation({
-              type: "multi_screen",
-              timestamp: Date.now(),
-              detail: `${details.screens.length} screens detected via Screen API`,
-            });
-          }
-        })
-        .catch(() => {
-          checkScreens();
-        });
-    } else {
-      checkScreens();
-    }
+    checkScreens();
 
     const interval = setInterval(checkScreens, 10000);
     return () => clearInterval(interval);

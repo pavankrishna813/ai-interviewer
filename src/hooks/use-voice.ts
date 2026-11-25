@@ -14,6 +14,14 @@ import {
   shouldFlushPlaybackQueue,
 } from "@/lib/voice/playback-jitter-buffer";
 import { isWhisperHallucination } from "@/lib/voice/hallucination-filter";
+import {
+  hasTrailingIncompleteThought,
+  isAnswerDoneSignal,
+  isCodingDoneSignal,
+  isAudioConfirmationOrGreeting,
+  stripAssistantEcho,
+  COMMON_ASSISTANT_UTTERANCES,
+} from "@/lib/voice/turn-completion";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const log = createLogger("voice");
@@ -25,6 +33,7 @@ export interface InterviewContext {
   aiTone: string;
   language: string;
   followUpDepth: string;
+  durationMinutes?: number;
   startQuestionIndex?: number;
   questions: Array<{
     text: string;
@@ -85,24 +94,55 @@ interface TrackedMessage {
  * 7. Per-question transitions managed by relay with LLM summarization
  * 8. On disconnect, all messages are saved to database
  */
+const HEX_LOOKUP: string[] = [];
+for (let i = 0; i < 256; i++) {
+  HEX_LOOKUP[i] = i.toString(16).padStart(2, "0");
+}
+
+function toHex(bytes: Uint8Array): string {
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += HEX_LOOKUP[bytes[i]];
+  }
+  return hex;
+}
+
+/**
+ * Resamples floating point input to 24kHz 16-bit PCM.
+ * Uses an area-weighted box filter (anti-aliasing) when downsampling from
+ * 48kHz / 44.1kHz so high-frequency harmonics do not alias into the speech spectrum.
+ */
 function downsampleTo24k(inputData: Float32Array, inputSampleRate: number): Int16Array {
   if (inputSampleRate === 24000) {
     const pcm = new Int16Array(inputData.length);
     for (let i = 0; i < inputData.length; i++) {
-      pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+      const s = Math.max(-1, Math.min(1, inputData[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
     return pcm;
   }
+
   const ratio = inputSampleRate / 24000;
   const newLength = Math.max(1, Math.round(inputData.length / ratio));
   const result = new Int16Array(newLength);
+
   for (let i = 0; i < newLength; i++) {
-    const srcIdx = i * ratio;
-    const idx0 = Math.floor(srcIdx);
-    const idx1 = Math.min(idx0 + 1, inputData.length - 1);
-    const frac = srcIdx - idx0;
-    const sample = inputData[idx0] * (1 - frac) + (inputData[idx1] ?? inputData[idx0]) * frac;
-    result[i] = Math.max(-32768, Math.min(32767, sample * 32768));
+    const start = i * ratio;
+    const end = (i + 1) * ratio;
+    const startIdx = Math.floor(start);
+    const endIdx = Math.min(inputData.length, Math.ceil(end));
+
+    let sum = 0;
+    let count = 0;
+    for (let j = startIdx; j < endIdx; j++) {
+      const overlap = Math.max(0, Math.min(end, j + 1) - Math.max(start, j));
+      sum += inputData[j] * overlap;
+      count += overlap;
+    }
+
+    const avg = count > 0 ? sum / count : (inputData[startIdx] || 0);
+    const s = Math.max(-1, Math.min(1, avg));
+    result[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
   return result;
 }
@@ -152,16 +192,53 @@ export function useVoice({
   const micHoldUntilRef = useRef(0);
   const bargeInFramesRef = useRef(0);
 
-  const BARGE_IN_RMS_THRESHOLD = 0.08;
-  const BARGE_IN_FRAME_COUNT = 4;
+  const BARGE_IN_RMS_THRESHOLD = 0.12;
+  const BARGE_IN_FRAME_COUNT = 6;
   const lastSpokenTimeRef = useRef(0);
+  const recentAiUtterancesRef = useRef<string[]>([]);
+  const lastAiSpeechEndedAtRef = useRef<number>(0);
+  const speechRecognitionResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const isSpeakerEcho = useCallback((candidateText: string): boolean => {
+    if (!candidateText || !candidateText.trim()) return false;
+
+    // Preserve valid brief candidate greetings and mic checks ("Yes, I can hear you", etc.)
+    if (isAudioConfirmationOrGreeting(candidateText)) {
+      return false;
+    }
+
+    const utterancesToCheck = [
+      chatBufferRef.current.trim(),
+      ...recentAiUtterancesRef.current,
+      ...COMMON_ASSISTANT_UTTERANCES,
+    ].filter(Boolean);
+
+    // 1. Check substring of full sentence/clause (>= 20 chars)
+    const normCand = candidateText.toLowerCase().replace(/[^\w\s]/g, "").trim();
+    if (normCand.length >= 20) {
+      for (const aiText of utterancesToCheck) {
+        const normAi = aiText.toLowerCase().replace(/[^\w\s]/g, "").trim();
+        if (normAi.length >= 20 && (normAi.includes(normCand) || normCand.includes(normAi))) {
+          return true;
+        }
+      }
+    }
+
+    // 2. Exact n-gram phrase coverage from stripAssistantEcho
+    const echoCheck = stripAssistantEcho(candidateText, utterancesToCheck);
+    return echoCheck.isFullEcho;
+  }, []);
 
   const onInterruptRef = useRef(onInterrupt);
   useEffect(() => { onInterruptRef.current = onInterrupt; }, [onInterrupt]);
+  const onTranscriptRef = useRef(onTranscript);
+  useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   const lastFinalUserTranscriptRef = useRef<{ text: string; at: number } | null>(null);
 
   // Buffers for accumulating streaming chunks
   const asrBufferRef = useRef<string>("");
+  const accumulatedSpeechRef = useRef<string>("");
+  const candidateTurnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatBufferRef = useRef<string>("");
   const lastOnAIResponseRef = useRef<string>("");
   const currentQuestionIndexRef = useRef(
@@ -184,7 +261,73 @@ export function useVoice({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const commitCandidateTurn = useCallback((text: string, reason: string) => {
+    if (candidateTurnTimerRef.current) {
+      clearTimeout(candidateTurnTimerRef.current);
+      candidateTurnTimerRef.current = null;
+    }
+    accumulatedSpeechRef.current = "";
+    asrBufferRef.current = "";
+    if (!text || !text.trim()) return;
+
+    // Suppress speaker acoustic echo
+    if (isSpeakerEcho(text)) {
+      log.info(`Suppressed isSpeakerEcho in commitCandidateTurn (${reason}): "${text}"`);
+      return;
+    }
+
+    // Strip any interviewer question/statement echo from the candidate's turn
+    const echoCheck = stripAssistantEcho(text, [
+      chatBufferRef.current.trim(),
+      ...recentAiUtterancesRef.current,
+    ].filter(Boolean));
+
+    if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+      log.info(`Suppressed 100% assistant echo in commitCandidateTurn (${reason}): "${text}"`);
+      return;
+    }
+
+    const clean = echoCheck.cleanedText.trim();
+    if (!clean) return;
+
+    const normalized = clean.replace(/\s+/g, " ").trim().toLowerCase();
+    const lastFinal = lastFinalUserTranscriptRef.current;
+    const isDuplicate =
+      !!lastFinal &&
+      lastFinal.text === normalized &&
+      Date.now() - lastFinal.at < 12_000;
+
+    if (!isDuplicate) {
+      lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now() };
+      onTranscriptRef.current?.(clean, true);
+      trackedMessagesRef.current.push({
+        role: "user",
+        content: clean,
+      });
+
+      if (relayConnectorRef.current?.isReady) {
+        log.info(`Forwarding completed candidate answer (${reason}): "${clean}"`);
+        relayConnectorRef.current.sendJson({
+          type: "candidate_turn_done",
+          reason,
+          text: clean,
+        });
+      }
+    }
+
+    setState((s) => ({
+      ...s,
+      userTranscript: "",
+      isProcessing: true,
+    }));
+  }, []);
+
   const cleanup = useCallback(() => {
+    if (candidateTurnTimerRef.current) {
+      clearTimeout(candidateTurnTimerRef.current);
+      candidateTurnTimerRef.current = null;
+    }
+    accumulatedSpeechRef.current = "";
     stopListening();
     interruptPlayback();
     relayConnectorRef.current?.close();
@@ -232,10 +375,26 @@ export function useVoice({
     }
     audioSourcesRef.current = [];
     playTimeRef.current = 0;
-    micHoldUntilRef.current = performance.now() + 250;
+    micHoldUntilRef.current = performance.now() + 400;
+    lastAiSpeechEndedAtRef.current = Date.now();
     bargeInFramesRef.current = 0;
     setState((s) => ({ ...s, isSpeaking: false }));
     onInterruptRef.current?.();
+
+    if (speechRecognitionResumeTimerRef.current) {
+      clearTimeout(speechRecognitionResumeTimerRef.current);
+      speechRecognitionResumeTimerRef.current = null;
+    }
+    speechRecognitionResumeTimerRef.current = setTimeout(() => {
+      speechRecognitionResumeTimerRef.current = null;
+      if (isListeningRef.current && speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.start();
+        } catch {
+          // already active
+        }
+      }
+    }, 450);
   }, [clearQueuedAudio]);
 
   const scheduleQueuedAudioFlush = useCallback(
@@ -257,6 +416,9 @@ export function useVoice({
   const flushQueuedAudio = useCallback((force = false) => {
     const ctx = audioContextRef.current;
     if (!ctx) return;
+    if (ctx.state === "suspended") {
+      void ctx.resume();
+    }
     if (queuedAudioSamplesRef.current === 0) return;
 
     const now = ctx.currentTime;
@@ -300,7 +462,7 @@ export function useVoice({
     source.start(startAt);
     playTimeRef.current = startAt + audioBuffer.duration;
     micHoldUntilRef.current =
-      performance.now() + Math.max(0, (playTimeRef.current - now) * 1000) + 250;
+      performance.now() + Math.max(0, (playTimeRef.current - now) * 1000) + 800;
     bargeInFramesRef.current = 0;
 
     audioSourcesRef.current.push(source);
@@ -310,6 +472,24 @@ export function useVoice({
       isProcessing: false,
     }));
 
+    // Halt Web Speech recognition while AI speaker audio is playing to prevent speaker bleed
+    if (speechRecognitionResumeTimerRef.current) {
+      clearTimeout(speechRecognitionResumeTimerRef.current);
+      speechRecognitionResumeTimerRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.abort();
+      } catch {
+        // noop
+      }
+    }
+    accumulatedSpeechRef.current = "";
+    if (candidateTurnTimerRef.current) {
+      clearTimeout(candidateTurnTimerRef.current);
+      candidateTurnTimerRef.current = null;
+    }
+
     source.onended = () => {
       audioSourcesRef.current = audioSourcesRef.current.filter(
         (s) => s !== source
@@ -318,7 +498,28 @@ export function useVoice({
         audioSourcesRef.current.length === 0 &&
         queuedAudioSamplesRef.current === 0
       ) {
+        lastAiSpeechEndedAtRef.current = Date.now();
+        // Hold mic shut briefly (500ms) post-playback to block trailing room echo
+        micHoldUntilRef.current = performance.now() + 500;
         setState((s) => ({ ...s, isSpeaking: false }));
+
+        if (speechRecognitionResumeTimerRef.current) {
+          clearTimeout(speechRecognitionResumeTimerRef.current);
+        }
+        speechRecognitionResumeTimerRef.current = setTimeout(() => {
+          speechRecognitionResumeTimerRef.current = null;
+          if (
+            isListeningRef.current &&
+            audioSourcesRef.current.length === 0 &&
+            speechRecognitionRef.current
+          ) {
+            try {
+              speechRecognitionRef.current.start();
+            } catch {
+              // already active
+            }
+          }
+        }, 550);
       }
     };
   }, [clearPlaybackFlushTimer, scheduleQueuedAudioFlush]);
@@ -328,10 +529,14 @@ export function useVoice({
     (pcmData: ArrayBuffer) => {
       const ctx = audioContextRef.current;
       if (!ctx) return;
+      if (ctx.state === "suspended") {
+        void ctx.resume();
+      }
 
       const float32 = new Float32Array(pcmData);
       if (float32.length === 0) return;
 
+      lastAiSpeechEndedAtRef.current = Date.now();
       if (firstQueuedAudioAtRef.current === null) {
         firstQueuedAudioAtRef.current = performance.now();
       }
@@ -376,6 +581,9 @@ export function useVoice({
       // Create AudioContext for playback
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      }
+      if (audioContextRef.current.state === "suspended") {
+        await audioContextRef.current.resume();
       }
 
       // Reset tracked messages
@@ -504,6 +712,11 @@ export function useVoice({
           setState((s) => ({ ...s, isConnected: true }));
           break;
 
+        case "processing_start":
+          log.info("Relay signaled processing_start");
+          setState((s) => ({ ...s, isProcessing: true }));
+          break;
+
         case "interrupt":
           interruptPlayback();
           setState((s) => ({ ...s, isProcessing: false }));
@@ -515,23 +728,72 @@ export function useVoice({
           break;
 
         case "asr": {
+          // If Web Speech API is actively producing words within 1500ms, prefer it
+          if (webSpeechActiveRef.current && Date.now() - webSpeechLastActiveAtRef.current < 1500) {
+            break;
+          }
           // ASR transcript chunk from Volcengine / Whisper — accumulate.
           const results =
             (msg.data?.results as Array<Record<string, unknown>>) || [];
           if (results.length > 0) {
-            const text = (results[0].text as string) || "";
-            if (text.trim() && !isWhisperHallucination(text, interviewContext.language)) {
-              asrBufferRef.current = text.trim();
-              setState((s) => ({ ...s, userTranscript: text }));
-              onTranscript?.(text, false);
+            const rawText = (results[0].text as string) || "";
+            if (!rawText.trim()) {
+              asrBufferRef.current = "";
+              setState((s) => ({ ...s, userTranscript: "" }));
+              break;
+            }
+            if (isSpeakerEcho(rawText)) {
+              asrBufferRef.current = "";
+              setState((s) => ({ ...s, userTranscript: "" }));
+              break;
+            }
+            const echoCheck = stripAssistantEcho(rawText, [
+              chatBufferRef.current.trim(),
+              ...recentAiUtterancesRef.current,
+            ].filter(Boolean));
+            if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+              asrBufferRef.current = "";
+              setState((s) => ({ ...s, userTranscript: "" }));
+              break;
+            }
+            const cleanText = echoCheck.cleanedText;
+            if (cleanText.trim() && !isWhisperHallucination(cleanText, interviewContext.language)) {
+              asrBufferRef.current = cleanText.trim();
+              setState((s) => ({ ...s, userTranscript: cleanText }));
+              onTranscriptRef.current?.(cleanText, false);
+            } else if (isWhisperHallucination(cleanText, interviewContext.language)) {
+              asrBufferRef.current = "";
+              setState((s) => ({ ...s, userTranscript: "" }));
             }
           }
           break;
         }
 
         case "asr_ended": {
-          const finalText =
+          // If Web Speech API handled this turn, suppress server Whisper final to avoid duplicate/hallucinated text
+          if (webSpeechActiveRef.current && Date.now() - webSpeechLastActiveAtRef.current < 1500) {
+            asrBufferRef.current = "";
+            break;
+          }
+          const rawFinalText =
             (typeof msg.text === "string" && msg.text.trim()) || asrBufferRef.current;
+          if (!rawFinalText) {
+            asrBufferRef.current = "";
+            break;
+          }
+
+          const echoCheck = stripAssistantEcho(rawFinalText, [
+            chatBufferRef.current.trim(),
+            ...recentAiUtterancesRef.current,
+          ].filter(Boolean));
+
+          if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+            log.info(`Suppressed echo in asr_ended: "${rawFinalText}"`);
+            asrBufferRef.current = "";
+            break;
+          }
+
+          const finalText = echoCheck.cleanedText;
           if (finalText && !isWhisperHallucination(finalText, interviewContext.language)) {
             const normalized = finalText.replace(/\s+/g, " ").trim().toLowerCase();
             const lastFinal = lastFinalUserTranscriptRef.current;
@@ -544,7 +806,7 @@ export function useVoice({
               log.debug(`Skipping duplicate USER final: "${normalized.slice(0, 60)}..."`);
             } else {
               lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now() };
-              onTranscript?.(finalText, true);
+              onTranscriptRef.current?.(finalText, true);
               trackedMessagesRef.current.push({
                 role: "user",
                 content: finalText,
@@ -578,12 +840,36 @@ export function useVoice({
         }
 
         case "tts_text": {
+          if (candidateTurnTimerRef.current) {
+            clearTimeout(candidateTurnTimerRef.current);
+            candidateTurnTimerRef.current = null;
+          }
+          accumulatedSpeechRef.current = "";
+          lastAiSpeechEndedAtRef.current = Date.now();
           const text = extractText(msg.data);
           if (text) {
-            chatBufferRef.current += (chatBufferRef.current ? " " : "") + text;
+            const isDelta = Boolean(
+              msg.data &&
+              typeof msg.data === "object" &&
+              (msg.data as { delta?: boolean }).delta === true
+            );
+            if (isDelta) {
+              chatBufferRef.current += text;
+            } else {
+              const needsSpace =
+                Boolean(chatBufferRef.current) &&
+                !/\s$/.test(chatBufferRef.current) &&
+                !/^\s/.test(text) &&
+                !/^[.,!?;:'"’)\]]/.test(text);
+              chatBufferRef.current += (needsSpace ? " " : "") + text;
+            }
+            const cleanedTranscript = chatBufferRef.current
+              .replace(/\[(?:call\s+)?[a-zA-Z0-9_]+(?:\(.*?\))?\]/gi, "")
+              .replace(/\s+([.,!?;:])/g, "$1")
+              .trim();
             setState((s) => ({
               ...s,
-              aiTranscript: chatBufferRef.current,
+              aiTranscript: cleanedTranscript,
               lastAssistantUtteranceEndedAt: 0,
               isProcessing: false,
             }));
@@ -599,17 +885,32 @@ export function useVoice({
 
         case "chat_ended":
         case "tts_ended": {
-          const fullResponse = chatBufferRef.current.trim();
+          lastAiSpeechEndedAtRef.current = Date.now();
+          const incomingText =
+            typeof msg.text === "string"
+              ? msg.text
+              : extractText(msg.data as Record<string, unknown> | undefined);
+          const sourceText = incomingText.trim() || chatBufferRef.current;
+          const rawResponse = sourceText
+            .replace(/\[(?:call\s+)?[a-zA-Z0-9_]+(?:\(.*?\))?\]/gi, "")
+            .trim();
+          const fullResponse = rawResponse.replace(/\s+([.,!?;:])/g, "$1").trim();
           chatBufferRef.current = "";
+          asrBufferRef.current = "";
           // Keep last transcript visible until next AI speech (replaced by tts_text/chat)
           setState((s) => ({
             ...s,
             aiTranscript: fullResponse,
+            userTranscript: "",
             lastAssistantUtteranceEndedAt:
               msg.type === "tts_ended" ? Date.now() : s.lastAssistantUtteranceEndedAt,
             isProcessing: false,
           }));
           if (fullResponse) {
+            recentAiUtterancesRef.current.push(fullResponse);
+            if (recentAiUtterancesRef.current.length > 25) {
+              recentAiUtterancesRef.current.shift();
+            }
             // Dedupe: chat_ended and tts_ended often both fire for same response.
             // Use dedicated ref — trackedMessagesRef can lag; normalize for comparison.
             const normalized = fullResponse.replace(/\s+/g, " ").trim();
@@ -737,6 +1038,14 @@ export function useVoice({
 
   const clientSpeechFramesRef = useRef(0);
   const clientPreRollRef = useRef<string[]>([]);
+  const clientGateOpenRef = useRef(false);
+  const clientLastVoiceAtRef = useRef(0);
+
+  // Web Speech API for zero-cost, hallucination-free in-browser transcription
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const speechRecognitionRef = useRef<any>(null);
+  const webSpeechActiveRef = useRef(false);
+  const webSpeechLastActiveAtRef = useRef(0);
 
   /** Start capturing microphone audio and sending to relay */
   const startListening = useCallback(async () => {
@@ -753,26 +1062,20 @@ export function useVoice({
       });
       mediaStreamRef.current = stream;
 
-      const ctx = new AudioContext();
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioCtx();
       if (ctx.state === "suspended") {
         await ctx.resume();
       }
       const actualSampleRate = ctx.sampleRate;
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
 
-      const silentGain = ctx.createGain();
-      silentGain.gain.value = 0;
-      source.connect(processor);
-      processor.connect(silentGain);
-      silentGain.connect(ctx.destination);
-
-      processor.onaudioprocess = (event) => {
+      const handleAudioChunk = (inputData: Float32Array) => {
         if (!isListeningRef.current) return;
         const connector = relayConnectorRef.current;
         if (!connector?.isReady) return;
-
-        const inputData = event.inputBuffer.getChannelData(0);
 
         // Compute RMS audio level (float32 range 0..1)
         let sumSq = 0;
@@ -781,17 +1084,18 @@ export function useVoice({
         const level = Math.min(1, rms * 5);
         setState((s) => ({ ...s, audioLevel: level }));
 
-        // Resample from actual hardware rate to 24000 Hz int16 PCM
+        // Resample from hardware rate to 24000 Hz int16 PCM
         const pcm24 = downsampleTo24k(inputData, actualSampleRate);
 
         // Send as hex-encoded string
-        const bytes = new Uint8Array(pcm24.buffer);
-        let hex = "";
-        for (let i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, "0");
-        }
+        const bytes = new Uint8Array(pcm24.buffer, pcm24.byteOffset, pcm24.byteLength);
+        const hex = toHex(bytes);
 
-        if (performance.now() < micHoldUntilRef.current) {
+        const isAiSpeakingOrEcho =
+          audioSourcesRef.current.length > 0 || performance.now() < micHoldUntilRef.current;
+
+        if (isAiSpeakingOrEcho) {
+          // AI model is speaking or in post-playback echo cooldown: suppress audio to prevent speaker echo unless user barges in
           if (rms < BARGE_IN_RMS_THRESHOLD) {
             bargeInFramesRef.current = 0;
             return;
@@ -802,62 +1106,331 @@ export function useVoice({
             return;
           }
 
-          // Sustained near-field speech should still be able to interrupt TTS.
+          // Sustained candidate speech interrupts playback
           micHoldUntilRef.current = 0;
+          bargeInFramesRef.current = 0;
+          interruptPlayback();
         } else {
           bargeInFramesRef.current = 0;
+        }
 
-          // Silence suppression: do not stream ambient room noise when user is not speaking
-          const CLIENT_VAD_THRESHOLD = 0.012;
-          if (rms >= CLIENT_VAD_THRESHOLD) {
-            clientSpeechFramesRef.current += 1;
-            if (clientSpeechFramesRef.current >= 2) {
-              lastSpokenTimeRef.current = performance.now();
+        const now = performance.now();
+        const CLIENT_SPEECH_OPEN_RMS = 0.006;
+        const CLIENT_SPEECH_HOLD_RMS = 0.003;
+        const CLIENT_SPEECH_HANGOVER_MS = 800;
+
+        if (rms >= CLIENT_SPEECH_OPEN_RMS) {
+          clientLastVoiceAtRef.current = now;
+          if (!clientGateOpenRef.current) {
+            clientGateOpenRef.current = true;
+            // Flush pre-roll chunks so leading consonants are intact
+            if (clientPreRollRef.current.length > 0) {
+              for (const pr of clientPreRollRef.current) {
+                connector.sendJson({ type: "audio", data: pr, sampleRate: 24000 });
+              }
+              clientPreRollRef.current = [];
             }
-          } else {
-            clientSpeechFramesRef.current = 0;
-          }
-          const hasRecentSpeech = performance.now() - lastSpokenTimeRef.current < 600;
-          if (!hasRecentSpeech) {
-            // Keep rolling pre-roll audio so the start of words is never clipped
-            clientPreRollRef.current.push(hex);
-            if (clientPreRollRef.current.length > 4) {
-              clientPreRollRef.current.shift();
-            }
-            return;
           }
         }
 
-        // Flush pre-roll buffer so beginning syllables (e.g. "Can you hear me") are never cut off
-        if (clientPreRollRef.current.length > 0) {
-          for (const preHex of clientPreRollRef.current) {
-            connector.sendJson({ type: "audio", data: preHex, sampleRate: 24000 });
+        if (clientGateOpenRef.current) {
+          if (rms >= CLIENT_SPEECH_HOLD_RMS) {
+            clientLastVoiceAtRef.current = now;
           }
-          clientPreRollRef.current = [];
+          connector.sendJson({ type: "audio", data: hex, sampleRate: 24000 });
+          if (now - clientLastVoiceAtRef.current >= CLIENT_SPEECH_HANGOVER_MS) {
+            clientGateOpenRef.current = false;
+            clientPreRollRef.current = [];
+          }
+        } else {
+          // Keep up to 6 pre-roll chunks (~300-500ms) while candidate is silent
+          clientPreRollRef.current.push(hex);
+          if (clientPreRollRef.current.length > 6) {
+            clientPreRollRef.current.shift();
+          }
         }
-
-        connector.sendJson({ type: "audio", data: hex, sampleRate: 24000 });
       };
 
-      processorRef.current = { processor, source, ctx };
+      let workletNode: AudioWorkletNode | null = null;
+      let scriptProcessor: ScriptProcessorNode | null = null;
+
+      if (ctx.audioWorklet) {
+        try {
+          const workletCode = `
+            class VoiceInputProcessor extends AudioWorkletProcessor {
+              constructor() {
+                super();
+                this._buf = new Float32Array(2048);
+                this._pos = 0;
+              }
+              process(inputs) {
+                const ch = inputs[0]?.[0];
+                if (!ch) return true;
+                for (let i = 0; i < ch.length; i++) {
+                  this._buf[this._pos++] = ch[i];
+                  if (this._pos >= 2048) {
+                    this.port.postMessage(this._buf);
+                    this._buf = new Float32Array(2048);
+                    this._pos = 0;
+                  }
+                }
+                return true;
+              }
+            }
+            registerProcessor('voice-input-processor', VoiceInputProcessor);
+          `;
+          const blob = new Blob([workletCode], { type: "application/javascript" });
+          const workletUrl = URL.createObjectURL(blob);
+          await ctx.audioWorklet.addModule(workletUrl);
+          URL.revokeObjectURL(workletUrl);
+
+          workletNode = new AudioWorkletNode(ctx, "voice-input-processor");
+          workletNode.port.onmessage = (e) => {
+            handleAudioChunk(e.data as Float32Array);
+          };
+          source.connect(workletNode);
+          workletNode.connect(ctx.destination);
+        } catch (workletErr) {
+          log.warn("AudioWorklet failed, falling back to ScriptProcessor:", workletErr);
+          workletNode = null;
+        }
+      }
+
+      if (!workletNode) {
+        scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0;
+        source.connect(scriptProcessor);
+        scriptProcessor.connect(silentGain);
+        silentGain.connect(ctx.destination);
+        scriptProcessor.onaudioprocess = (event) => {
+          handleAudioChunk(event.inputBuffer.getChannelData(0));
+        };
+      }
+
+      processorRef.current = { workletNode, scriptProcessor, source, ctx };
       isListeningRef.current = true;
       setState((s) => ({ ...s, isListening: true, userTranscript: "" }));
+
+      // ── Native Web Speech API for real-time, zero-cost, hallucination-free transcription ──
+      if (typeof window !== "undefined") {
+        const SpeechRec =
+          (window as unknown as { SpeechRecognition?: any; webkitSpeechRecognition?: any }).SpeechRecognition ||
+          (window as unknown as { SpeechRecognition?: any; webkitSpeechRecognition?: any }).webkitSpeechRecognition;
+
+        if (SpeechRec) {
+          try {
+            const recognition = new SpeechRec();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.maxAlternatives = 1;
+
+            const langRaw = (interviewContext.language || "en").toLowerCase();
+            recognition.lang = langRaw.startsWith("zh")
+              ? "zh-CN"
+              : langRaw.startsWith("es")
+              ? "es-ES"
+              : langRaw.startsWith("fr")
+              ? "fr-FR"
+              : langRaw.startsWith("de")
+              ? "de-DE"
+              : langRaw.startsWith("ja")
+              ? "ja-JP"
+              : "en-US";
+
+            recognition.onresult = (event: any) => {
+              let interim = "";
+              let finalChunk = "";
+
+              for (let i = event.resultIndex; i < event.results.length; i++) {
+                const res = event.results[i];
+                const text = res[0]?.transcript || "";
+                if (res.isFinal) {
+                  finalChunk += text;
+                } else {
+                  interim += text;
+                }
+              }
+
+              const isAudioCurrentlyPlaying =
+                audioSourcesRef.current.length > 0 ||
+                performance.now() < micHoldUntilRef.current ||
+                Date.now() - lastAiSpeechEndedAtRef.current < 2000;
+
+              const cleanInterim = interim.trim();
+              if (cleanInterim) {
+                if (isAudioCurrentlyPlaying || isSpeakerEcho(cleanInterim)) {
+                  return;
+                }
+                // Clear any pending turn finalization while candidate is speaking interim words
+                if (candidateTurnTimerRef.current) {
+                  clearTimeout(candidateTurnTimerRef.current);
+                  candidateTurnTimerRef.current = null;
+                }
+                webSpeechActiveRef.current = true;
+                webSpeechLastActiveAtRef.current = Date.now();
+                const displayTranscript = accumulatedSpeechRef.current
+                  ? `${accumulatedSpeechRef.current} ${cleanInterim}`
+                  : cleanInterim;
+                setState((s) => ({ ...s, userTranscript: displayTranscript }));
+                onTranscriptRef.current?.(displayTranscript, false);
+              }
+
+              const cleanFinal = finalChunk.trim();
+              if (cleanFinal) {
+                // Suppress speaker echo against recent AI speech and speaker playback state
+                if (isAudioCurrentlyPlaying || isSpeakerEcho(cleanFinal)) {
+                  log.info(`Suppressed audio during AI speech playback or echo: "${cleanFinal}"`);
+                  accumulatedSpeechRef.current = "";
+                  return;
+                }
+
+                const echoCheck = stripAssistantEcho(cleanFinal, [
+                  chatBufferRef.current.trim(),
+                  ...recentAiUtterancesRef.current,
+                ].filter(Boolean));
+
+                if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+                  log.info(`Suppressed speaker acoustic echo in candidate transcript: "${cleanFinal}"`);
+                  accumulatedSpeechRef.current = "";
+                  return;
+                }
+
+                const effectiveFinal = echoCheck.cleanedText;
+
+                // Suppress Whisper / ASR silence hallucinations
+                if (isWhisperHallucination(effectiveFinal, interviewContext.language)) {
+                  log.info(`Suppressed hallucination in candidate transcript: "${effectiveFinal}"`);
+                  return;
+                }
+
+                webSpeechActiveRef.current = true;
+                webSpeechLastActiveAtRef.current = Date.now();
+
+                // Accumulate effectiveFinal into our active answer buffer
+                accumulatedSpeechRef.current = accumulatedSpeechRef.current
+                  ? `${accumulatedSpeechRef.current} ${effectiveFinal}`
+                  : effectiveFinal;
+                const fullText = accumulatedSpeechRef.current;
+
+                // Guard against accumulated speech concatenating speaker bleed fragments
+                const fullEchoCheck = stripAssistantEcho(fullText, [
+                  chatBufferRef.current.trim(),
+                  ...recentAiUtterancesRef.current,
+                ].filter(Boolean));
+                if (fullEchoCheck.isFullEcho || !fullEchoCheck.cleanedText) {
+                  log.info(`Suppressed accumulated speaker echo: "${fullText}"`);
+                  accumulatedSpeechRef.current = "";
+                  return;
+                }
+
+                setState((s) => ({ ...s, userTranscript: fullText }));
+                onTranscriptRef.current?.(fullText, false);
+
+                // 1. Check if the candidate explicitly signaled verbal completion
+                if (isAnswerDoneSignal(effectiveFinal) || isCodingDoneSignal(effectiveFinal) || isAnswerDoneSignal(fullText)) {
+                  log.info(`Verbal completion signal detected in "${effectiveFinal}" — finalizing turn immediately`);
+                  commitCandidateTurn(fullText, "verbal_completion");
+                  return;
+                }
+
+                // 2. Otherwise buffer: 1500ms for brief audio checks/greetings, 3500ms for technical answers, 6000ms for incomplete
+                if (candidateTurnTimerRef.current) {
+                  clearTimeout(candidateTurnTimerRef.current);
+                }
+
+                const isBrief = isAudioConfirmationOrGreeting(fullText);
+                const isIncomplete = hasTrailingIncompleteThought(fullText);
+                const silenceDelay = isBrief ? 1500 : (isIncomplete ? 6000 : 3500);
+
+                candidateTurnTimerRef.current = setTimeout(() => {
+                  candidateTurnTimerRef.current = null;
+                  commitCandidateTurn(accumulatedSpeechRef.current, "silence_timeout");
+                }, silenceDelay);
+              }
+            };
+
+            recognition.onerror = (e: any) => {
+              // 'no-speech' is expected during periods of silence
+              if (e.error !== "no-speech" && e.error !== "audio-capture") {
+                log.warn("Web Speech API status:", e.error);
+              }
+            };
+
+            recognition.onend = () => {
+              // Automatically resume recognition as long as the interview is listening and AI is NOT speaking
+              if (
+                isListeningRef.current &&
+                audioSourcesRef.current.length === 0 &&
+                performance.now() >= micHoldUntilRef.current
+              ) {
+                setTimeout(() => {
+                  if (
+                    isListeningRef.current &&
+                    audioSourcesRef.current.length === 0 &&
+                    performance.now() >= micHoldUntilRef.current
+                  ) {
+                    try {
+                      recognition.start();
+                    } catch {
+                      // Ignore if already active
+                    }
+                  }
+                }, 100);
+              }
+            };
+
+            recognition.start();
+            speechRecognitionRef.current = recognition;
+            log.info("Native Web Speech API active for real-time transcription");
+          } catch (recErr) {
+            log.warn("Could not start Web Speech Recognition, falling back to server ASR:", recErr);
+          }
+        }
+      }
     } catch (error) {
       const msg =
         error instanceof Error ? error.message : "Microphone access failed";
       onError?.(msg);
     }
-  }, [onError, onTranscript, interviewContext.language]);
+  }, [onError, onTranscript, interviewContext.language, commitCandidateTurn]);
 
   /** Stop capturing microphone */
   const stopListening = useCallback(() => {
     isListeningRef.current = false;
+    clientGateOpenRef.current = false;
+    clientPreRollRef.current = [];
+
+    // Capture and commit any pending candidate speech transcript before tearing down
+    const pendingText = (accumulatedSpeechRef.current || asrBufferRef.current || state.userTranscript || "").trim();
+    if (pendingText) {
+      log.info(`Flushing pending candidate speech on mute: "${pendingText}"`);
+      commitCandidateTurn(pendingText, "mute");
+    } else if (relayConnectorRef.current?.isReady) {
+      relayConnectorRef.current.sendJson({ type: "candidate_turn_done", reason: "mute" });
+    }
+
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.stop();
+      } catch {
+        // noop
+      }
+      speechRecognitionRef.current = null;
+    }
+    webSpeechActiveRef.current = false;
 
     if (processorRef.current) {
-      const { processor, source, ctx } = processorRef.current;
-      processor.disconnect();
-      source.disconnect();
-      ctx.close();
+      const { workletNode, scriptProcessor, source, ctx } = processorRef.current;
+      try {
+        workletNode?.disconnect();
+        scriptProcessor?.disconnect();
+        source?.disconnect();
+        ctx?.close();
+      } catch {
+        // already closed
+      }
       processorRef.current = null;
     }
 
@@ -866,8 +1439,8 @@ export function useVoice({
       mediaStreamRef.current = null;
     }
 
-    setState((s) => ({ ...s, isListening: false, audioLevel: 0 }));
-  }, []);
+    setState((s) => ({ ...s, isListening: false, audioLevel: 0, userTranscript: "", isProcessing: true }));
+  }, [state.userTranscript, onTranscript]);
 
   /** Request transition to the next question */
   const nextQuestion = useCallback(() => {
@@ -905,6 +1478,40 @@ export function useVoice({
   const sendWhiteboardUpdate = useCallback((imageDataUrl: string) => {
     latestWhiteboardUpdateRef.current = imageDataUrl;
     relayConnectorRef.current?.sendJson({ type: "whiteboard_update", imageDataUrl });
+  }, []);
+
+  /** Send proctoring event to the relay for conversational intervention */
+  const sendProctorAlert = useCallback((alertType: string, detail?: string) => {
+    relayConnectorRef.current?.sendJson({ type: "proctor_alert", alertType, detail });
+  }, []);
+
+  /** Send time limit expired event to the relay to deliver spoken conclusion */
+  const sendTimeExpired = useCallback(() => {
+    relayConnectorRef.current?.sendJson({ type: "time_expired" });
+  }, []);
+
+  /** Send code execution results (logs, formatted output, runtime) to relay */
+  const sendCodeExecutionResult = useCallback(
+    (payload: {
+      language: string;
+      code: string;
+      success: boolean;
+      logs: string[];
+      resultFormatted?: string;
+      error?: string;
+      executionTimeMs: number;
+    }) => {
+      relayConnectorRef.current?.sendJson({
+        type: "code_execution_result",
+        ...payload,
+      });
+    },
+    []
+  );
+
+  /** Send arbitrary JSON message to relay */
+  const sendJson = useCallback((data: Record<string, unknown>) => {
+    relayConnectorRef.current?.sendJson(data);
   }, []);
 
   /** Save remaining tracked messages and complete the session */
@@ -948,14 +1555,50 @@ export function useVoice({
 
   /** Disconnect, save messages, and clean up everything */
   const disconnect = useCallback(async () => {
-    setState((s) => ({ ...s, isSaving: true }));
+    // Immediately terminate audio playback and disconnect relay so all speech ceases with 0ms delay
+    interruptPlayback();
+    stopListening();
+    if (audioContextRef.current) {
+      try {
+        void audioContextRef.current.close();
+      } catch {
+        // ignore
+      }
+      audioContextRef.current = null;
+    }
+    relayConnectorRef.current?.close();
+    relayConnectorRef.current = null;
+
+    setState((s) => ({
+      ...s,
+      isSaving: true,
+      isConnected: false,
+      isListening: false,
+      isSpeaking: false,
+    }));
     try {
       await saveAndComplete();
     } finally {
       cleanup();
       // isSaving is reset by cleanup
     }
-  }, [saveAndComplete, cleanup]);
+  }, [interruptPlayback, stopListening, saveAndComplete, cleanup]);
+
+  /** Explicit candidate trigger to complete their answer and request AI response */
+  const finishAnswer = useCallback(() => {
+    const pendingText = (accumulatedSpeechRef.current || asrBufferRef.current || state.userTranscript || "").trim();
+    if (pendingText) {
+      log.info(`finishAnswer: candidate manually completed answer (${pendingText.length} chars)`);
+      commitCandidateTurn(pendingText, "user_done_button");
+    } else if (relayConnectorRef.current?.isReady) {
+      log.info("finishAnswer: triggered without local text — notifying relay");
+      relayConnectorRef.current.sendJson({
+        type: "candidate_turn_done",
+        reason: "user_done_button",
+      });
+      setState((s) => ({ ...s, isProcessing: true }));
+    }
+  }, [commitCandidateTurn, state.userTranscript]);
 
   return {
     ...state,
@@ -963,11 +1606,16 @@ export function useVoice({
     disconnect,
     startListening,
     stopListening,
+    finishAnswer,
     nextQuestion,
     previousQuestion,
     sendTextMessage,
     sendCodeUpdate,
     sendWhiteboardUpdate,
+    sendProctorAlert,
+    sendTimeExpired,
+    sendCodeExecutionResult,
+    sendJson,
     interruptPlayback,
     mediaStreamRef,
   };

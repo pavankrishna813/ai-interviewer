@@ -25,7 +25,7 @@ export default function AppleIcon() {
               width: 14,
               height: h,
               borderRadius: 7,
-              background: "#BE5A3C",
+              background: "#0B5ED7",
             }}
           />
         ))}

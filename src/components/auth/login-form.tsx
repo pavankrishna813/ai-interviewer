@@ -1,13 +1,12 @@
 "use client";
 
 import { useAppLocale } from "@/components/app-locale-provider";
-import { AuralLogo } from "@/components/ui/aural-logo";
+import { TrovenLogo } from "@/components/ui/aural-logo";
 import { Button } from "@/components/ui/button";
 import {
     Card,
     CardContent,
     CardDescription,
-    CardFooter,
     CardHeader,
     CardTitle,
 } from "@/components/ui/card";
@@ -16,7 +15,6 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { createClient } from "@/lib/supabase/client";
 import { Loader2 } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -58,7 +56,7 @@ export function LoginForm() {
   return (
     <Card>
       <CardHeader className="text-center">
-        <AuralLogo size={64} className="mx-auto mb-2" />
+        <TrovenLogo size={64} className="mx-auto mb-2" />
         <CardTitle className="font-heading text-2xl">
           {t("auth.welcomeBack")}
         </CardTitle>
@@ -93,14 +91,6 @@ export function LoginForm() {
           </Button>
         </form>
       </CardContent>
-      <CardFooter className="justify-center">
-        <p className="text-sm text-muted-foreground">
-          {t("auth.noAccount")}{" "}
-          <Link href="/register" className="text-primary hover:underline">
-            {t("auth.signUp")}
-          </Link>
-        </p>
-      </CardFooter>
     </Card>
   );
 }

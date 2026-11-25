@@ -53,9 +53,9 @@ export const VOICE_TOUR_STEPS: IntervieweeTourStep[] = [
   {
     id: "voice-progress",
     selector: '[data-tour="voice-progress"]',
-    title: "Question Progress",
+    title: "End Interview",
     description:
-      "Track your progress here. Use Previous/Next to navigate between questions, or click End when finished.",
+      "Click here when you are ready to conclude the interview and submit your responses.",
     placement: "top",
   },
 ];

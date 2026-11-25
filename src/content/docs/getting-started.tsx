@@ -9,7 +9,7 @@ export const gettingStartedArticles: DocArticle[] = [
   {
     slug: "what-is-aural",
     categorySlug: "getting-started",
-    title: "What is Aural?",
+    title: "What is Troven?",
     description: "AI-powered interview platform for hiring, research, and practice",
     audience: "both",
     order: 1,
@@ -17,7 +17,7 @@ export const gettingStartedArticles: DocArticle[] = [
       <>
         <h2>Product Overview</h2>
         <p>
-          Aural is an AI-powered interview platform that conducts structured interviews autonomously. You design an interview, share a link, and Aural&apos;s AI handles the conversation — asking questions, probing with follow-ups, and generating detailed analysis when the session is complete.
+          Troven is an AI-powered interview platform that conducts structured interviews autonomously. You design an interview, share a link, and Troven&apos;s AI handles the conversation — asking questions, probing with follow-ups, and generating detailed analysis when the session is complete.
         </p>
 
         <h3>Key Features</h3>
@@ -69,9 +69,9 @@ export const gettingStartedArticles: DocArticle[] = [
     order: 2,
     content: () => (
       <>
-        <h2>Sign Up</h2>
+        <h2>Sign In</h2>
         <p>
-          Go to <DocLink href="/register">/register</DocLink> and enter your name, email, and password.
+          Go to <DocLink href="/login">/login</DocLink> and enter your email and password.
         </p>
 
         <DocImage src="/images/docs/register.webp" alt="Registration page with name, email, and password fields" />

@@ -25,7 +25,7 @@ export default function Icon() {
               width: 3,
               height: h,
               borderRadius: 1.5,
-              background: "#BE5A3C",
+              background: "#0B5ED7",
             }}
           />
         ))}

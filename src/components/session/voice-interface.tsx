@@ -2,64 +2,69 @@
 
 import { CodeBlock } from "@/components/code-editor/code-block";
 import {
-    CodeEditorCanvas,
-    type CodeEditorCanvasRef,
+  CodeEditorCanvas,
+  type CodeEditorCanvasRef,
 } from "@/components/code-editor/code-editor-canvas";
+import { type ExecutionResult } from "@/lib/code-runner/sandbox-runner";
 import { IntervieweeHelpPopover } from "@/components/session/interviewee-help-popover";
 import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-    Sheet,
-    SheetContent,
-    SheetHeader,
-    SheetTitle,
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
 } from "@/components/ui/sheet";
 import {
-    WhiteboardCanvas,
-    type WhiteboardCanvasRef,
+  WhiteboardCanvas,
+  type WhiteboardCanvasRef,
 } from "@/components/whiteboard/whiteboard-canvas";
 import { useInterviewRecording } from "@/hooks/use-interview-recording";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useVoice, type InterviewContext } from "@/hooks/use-voice";
+import { useAiProctor, type ProctorAlertEvent } from "@/hooks/use-ai-proctor";
+import { isWhisperHallucination } from "@/lib/voice/hallucination-filter";
+import { stripAssistantEcho } from "@/lib/voice/turn-completion";
+import { trpc } from "@/lib/trpc/client";
+import { cn } from "@/lib/utils";
 import {
-    AlertCircle,
-    Check,
-    CheckCircle2,
-    ChevronLeft,
-    ChevronRight,
-    ChevronDown,
-    ChevronUp,
-    Clock,
-    Code2,
-    FileText,
-    Loader2,
-    MessageSquare,
-    Mic,
-    MicOff,
-    PenLine,
-    PhoneOff,
-    Plus,
-    Save,
-    Send,
-    SkipBack,
-    SkipForward,
-    Video,
-    Volume2,
-    X,
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Code2,
+  FileText,
+  Headphones,
+  Loader2,
+  MessageSquare,
+  Mic,
+  MicOff,
+  PenLine,
+  PhoneOff,
+  Plus,
+  Save,
+  Send,
+  Sparkles,
+  Video,
+  Volume2,
+  X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -111,15 +116,17 @@ function looksLikeInterviewFarewell(text: string): boolean {
     /\bgood\s*bye\b/,
     /\bgoodbye\b/,
     /\bbye for now\b/,
-    /\bhave a great day\b/,
+    /\bhave a (?:great|good|wonderful) day\b/,
     /\btake care\b/,
     /\bwrap up here\b/,
     /\bthat'?s all for now\b/,
-    /\bthank(?:s| you)(?: so much)? for your time\b/,
-    /\bi wish you all the best\b/,
+    /\bthank(?:s|\s+you)(?:\s+so\s+much)?\s+for\s+your\s+time\b/,
+    /\bi wish you (?:all )?the best\b/,
+    /\bbest of luck\b/,
     /\bbest moving forward\b/,
     /\bthat wraps up\b/,
     /\bwraps up our\b/,
+    /\bpleasure (?:speaking|talking) with you\b/,
     /\bbest in your .*journey\b/,
     /再见/,
     /保重/,
@@ -373,6 +380,7 @@ interface VoiceInterfaceProps {
   chatEnabled?: boolean;
   onComplete?: () => void;
   videoMode?: boolean;
+  antiCheatingEnabled?: boolean;
   /** Render in static preview mode — shows full layout without connecting */
   preview?: boolean;
 }
@@ -394,6 +402,7 @@ export function VoiceInterface({
   chatEnabled = false,
   onComplete,
   videoMode = false,
+  antiCheatingEnabled = false,
   preview = false,
 }: VoiceInterfaceProps) {
   const { resolvedTheme } = useTheme();
@@ -430,7 +439,7 @@ export function VoiceInterface({
   const codeEditorRef = useRef<CodeEditorCanvasRef>(null);
   const liveCodeSnapshotRef = useRef<string | null>(null);
   const lastFinalTranscriptRef = useRef("");
-  const handleEndInterviewRef = useRef<() => void>(() => {});
+  const handleEndInterviewRef = useRef<() => void>(() => { });
 
   // ── Countdown timer state ────────────────────────────────────────
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
@@ -447,10 +456,10 @@ export function VoiceInterface({
     () =>
       initialDrawings?.length
         ? initialDrawings.map((d) => ({
-            id: d.id,
-            label: d.label,
-            snapshotData: d.snapshotData,
-          }))
+          id: d.id,
+          label: d.label,
+          snapshotData: d.snapshotData,
+        }))
         : [{ id: crypto.randomUUID(), label: "Drawing 1", snapshotData: null }],
   );
   const [activeDrawingIdx, setActiveDrawingIdx] = useState(0);
@@ -489,7 +498,7 @@ export function VoiceInterface({
         return () => clearTimeout(timer);
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whiteboardActive]);
 
   // ── Persist active drawing/code on page close ───────────────────
@@ -604,7 +613,7 @@ export function VoiceInterface({
     const video = cameraPipRef.current;
     if (video && recording.cameraStream) {
       video.srcObject = recording.cameraStream;
-      video.play().catch(() => {});
+      video.play().catch(() => { });
     }
     return () => {
       if (video) video.srcObject = null;
@@ -614,37 +623,58 @@ export function VoiceInterface({
   // ── Voice hooks ─────────────────────────────────────────────────
   const handleTranscript = useCallback(
     (text: string, isFinal: boolean) => {
-      if (isFinal && text.trim()) {
-        const normalized = normalizeTranscript(text);
-        if (normalized === lastFinalTranscriptRef.current) return;
-        lastFinalTranscriptRef.current = normalized;
-        setMessages((prev) => upsertFinalVoiceTranscript(prev, text));
-      } else if (!isFinal && text.trim()) {
+      if (!text || !text.trim()) return;
+      if (isWhisperHallucination(text, interviewContext.language)) return;
+
+      if (isFinal) {
+        setMessages((prev) => {
+          const recentAssistantMessages = prev
+            .filter((m) => m.role === "assistant")
+            .slice(-8)
+            .map((m) => m.content);
+          const echoCheck = stripAssistantEcho(text, recentAssistantMessages);
+          if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+            return prev;
+          }
+          const cleanText = echoCheck.cleanedText;
+          if (isWhisperHallucination(cleanText, interviewContext.language)) {
+            return prev;
+          }
+
+          const normalized = normalizeTranscript(cleanText);
+          if (normalized === lastFinalTranscriptRef.current) return prev;
+          lastFinalTranscriptRef.current = normalized;
+          return upsertFinalVoiceTranscript(prev, cleanText);
+        });
+      } else {
         lastFinalTranscriptRef.current = "";
       }
     },
-    [],
+    [interviewContext.language],
   );
 
   const handleAIResponse = useCallback((text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
+    const cleaned = text
+      .replace(/\[(?:call\s+)?[a-zA-Z0-9_]+(?:\(.*?\))?\]/gi, "")
+      .replace(/\s+([.,!?;:])/g, "$1")
+      .trim();
+    if (!cleaned) return;
     setMessages((prev) => {
-      if (hasRecentAssistantTranscript(prev, trimmed)) {
+      if (hasRecentAssistantTranscript(prev, cleaned)) {
         return prev;
       }
       const last = prev[prev.length - 1];
       if (last?.role !== "assistant") {
-        return [...prev, { id: crypto.randomUUID(), role: "assistant", content: trimmed, source: "voice" }];
+        return [...prev, { id: crypto.randomUUID(), role: "assistant", content: cleaned, source: "voice" }];
       }
       const lastNorm = last.content.replace(/\s+/g, " ").trim();
-      const newNorm = trimmed.replace(/\s+/g, " ").trim();
+      const newNorm = cleaned.replace(/\s+/g, " ").trim();
       if (lastNorm === newNorm) return prev;
       // Replace if new is superset (tts_ended has more than chat_ended)
       if (newNorm.startsWith(lastNorm) && newNorm.length > lastNorm.length) {
-        return [...prev.slice(0, -1), { ...last, content: trimmed }];
+        return [...prev.slice(0, -1), { ...last, content: cleaned }];
       }
-      return [...prev, { id: crypto.randomUUID(), role: "assistant", content: trimmed, source: "voice" }];
+      return [...prev, { id: crypto.randomUUID(), role: "assistant", content: cleaned, source: "voice" }];
     });
   }, []);
 
@@ -653,10 +683,30 @@ export function VoiceInterface({
     setTimeout(() => setError(""), 5000);
   }, []);
 
+  const augmentedInterviewContext = useMemo(
+    () => ({
+      ...interviewContext,
+      durationMinutes: durationMinutes ?? 20,
+    }),
+    [interviewContext, durationMinutes]
+  );
+
+  const [isUserTyping, setIsUserTyping] = useState(false);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleUserTyped = useCallback(() => {
+    setIsUserTyping(true);
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      setIsUserTyping(false);
+      typingTimerRef.current = null;
+    }, 3500);
+  }, []);
+
   const voice = useVoice({
     interviewId,
     sessionId,
-    interviewContext,
+    interviewContext: augmentedInterviewContext,
     onTranscript: handleTranscript,
     onAIResponse: handleAIResponse,
     onError: handleError,
@@ -664,11 +714,110 @@ export function VoiceInterface({
     onInterrupt: videoMode ? recording.cancelTts : undefined,
   });
 
+  const handleCodeRun = useCallback(
+    (result: ExecutionResult, code: string, language: string) => {
+      voice.sendCodeExecutionResult({
+        language,
+        code,
+        success: result.success,
+        logs: result.logs,
+        resultFormatted: result.result,
+        error: result.error,
+        executionTimeMs: result.executionTimeMs,
+      });
+    },
+    [voice]
+  );
+
+  // ── AI Proctor Matrix (Vision + Voice conversational intervention) ───
+  const reportViolationMutation = trpc.session.reportAntiCheatingViolation.useMutation();
+
+  const handleProctorAlert = useCallback(
+    (alert: ProctorAlertEvent) => {
+      // 1. Send alert event to voice relay so AI immediately disrupts and addresses the violation
+      voice.sendProctorAlert(alert.type, alert.detail);
+
+      // 2. Persist violation to session integrity log
+      if (sessionId && sessionId !== "__preview__") {
+        reportViolationMutation.mutate({
+          sessionId,
+          violation: {
+            type: alert.type as any,
+            timestamp: alert.timestamp,
+            detail: alert.detail,
+          },
+        });
+      }
+    },
+    [voice, sessionId, reportViolationMutation],
+  );
+
+  // ── Page departure / tab switch proctor listener ───
+  useEffect(() => {
+    if (!antiCheatingEnabled || preview) return;
+
+    let blurTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        handleProctorAlert({
+          type: "page_departure",
+          timestamp: Date.now(),
+          detail: "Candidate switched away from interview tab",
+        });
+      }
+    };
+
+    const handleBlur = () => {
+      blurTimer = setTimeout(() => {
+        if (document.hidden) {
+          handleProctorAlert({
+            type: "page_departure",
+            timestamp: Date.now(),
+            detail: "Candidate left the interview window",
+          });
+        }
+      }, 1000);
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", handleBlur);
+
+    return () => {
+      if (blurTimer) clearTimeout(blurTimer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [antiCheatingEnabled, preview, handleProctorAlert]);
+
+  const sortedQuestionsEarly = useMemo(
+    () => interviewContext.questions.slice().sort((a, b) => a.order - b.order),
+    [interviewContext.questions]
+  );
+  const isCodingActive =
+    sortedQuestionsEarly[voice.currentQuestionIndex]?.type === "CODING" || codeEditorActive;
+
+  const proctor = useAiProctor({
+    enabled: !!antiCheatingEnabled && !!videoMode && !preview,
+    cameraStream: recording.cameraStream,
+    videoElement: cameraPipRef.current,
+    audioLevel: voice.audioLevel,
+    sessionId,
+    isCodingActive,
+    isUserTyping,
+    onProctorAlert: handleProctorAlert,
+  });
+
   useEffect(() => {
     if (voice.isConnected) {
       setIsStartingInterview(false);
+      // Auto-start listening so mic stream is active and synchronized immediately
+      if (!voice.isListening) {
+        voice.startListening().catch((err) => {
+          console.warn("[voice] Failed to auto-start listening on connect:", err);
+        });
+      }
     }
-  }, [voice.isConnected]);
+  }, [voice.isConnected, voice.isListening, voice.startListening]);
 
   useEffect(() => {
     if (error) {
@@ -676,16 +825,42 @@ export function VoiceInterface({
     }
   }, [error]);
 
-  // ── Start recording when voice connects (video mode) ───────────
+  // Auto-connect to voice relay when mounted after onboarding
+  const autoConnectAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (preview || voice.isConnected || autoConnectAttemptedRef.current) return;
+    autoConnectAttemptedRef.current = true;
+    setIsStartingInterview(true);
+    voice.connect().catch((err) => {
+      console.warn("[voice] Auto-connect on mount error:", err);
+      setIsStartingInterview(false);
+    });
+  }, [preview, voice.isConnected, voice.connect]);
+
+  // ── Start recording when voice connects & mic is ready (video mode) ───────────
   const recordingStartedRef = useRef(false);
   useEffect(() => {
     if (!videoMode || !voice.isConnected || recordingStartedRef.current) return;
-    recordingStartedRef.current = true;
     const micStream = voice.mediaStreamRef.current;
-    recording.start(micStream ?? undefined);
+    if (micStream || voice.isListening) {
+      recordingStartedRef.current = true;
+      recording.start(micStream ?? undefined);
+    }
+  }, [videoMode, voice.isConnected, voice.isListening]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Safety fallback: ensure recording starts even if mic initialization takes slightly longer
+  useEffect(() => {
+    if (!videoMode || !voice.isConnected || recordingStartedRef.current) return;
+    const timer = setTimeout(() => {
+      if (!recordingStartedRef.current && voice.isConnected) {
+        recordingStartedRef.current = true;
+        recording.start(voice.mediaStreamRef.current ?? undefined);
+      }
+    }, 1200);
+    return () => clearTimeout(timer);
   }, [videoMode, voice.isConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Attach mic stream to recording when it becomes available
+  // Attach mic stream to recording whenever it becomes available
   useEffect(() => {
     if (!videoMode || !voice.isListening) return;
     const micStream = voice.mediaStreamRef.current;
@@ -788,8 +963,8 @@ export function VoiceInterface({
           if (!svgUrl) return;
           svgToPngDataUrl(svgUrl).then((pngUrl) => {
             if (pngUrl) voice.sendWhiteboardUpdate(pngUrl);
-          }).catch(() => {});
-        }).catch(() => {});
+          }).catch(() => { });
+        }).catch(() => { });
       }
     },
     [drawings, activeDrawingIdx, persistDrawing, voice],
@@ -1099,16 +1274,6 @@ export function VoiceInterface({
     }
   }, [drawings, activeDrawingIdx, persistDrawing, codeSnippets, activeSnippetIdx, persistCodeSnippet]);
 
-  const handlePreviousQuestion = useCallback(async () => {
-    await saveCurrentContent();
-    voice.previousQuestion();
-  }, [saveCurrentContent, voice]);
-
-  const handleNextQuestion = useCallback(async () => {
-    await saveCurrentContent();
-    voice.nextQuestion();
-  }, [saveCurrentContent, voice]);
-
   // ── Editor toggle helpers (save before deactivate, restore on activate)
   const saveCodeEditorState = useCallback(() => {
     const ce = codeEditorRef.current;
@@ -1166,7 +1331,7 @@ export function VoiceInterface({
       }, 400);
       return () => clearTimeout(timer);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [codeEditorActive]);
 
   useEffect(() => {
@@ -1178,7 +1343,7 @@ export function VoiceInterface({
       }, 400);
       return () => clearTimeout(timer);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whiteboardActive]);
 
   // ── Common save-and-end logic ───────────────────────────────────
@@ -1186,12 +1351,18 @@ export function VoiceInterface({
   const handleEndInterview = useCallback(async () => {
     if (endingRef.current) return;
     endingRef.current = true;
+
+    // Immediately kill all voice audio and listening so the AI stops talking with 0ms latency!
+    voice.interruptPlayback();
+    voice.stopListening();
+
     setLocallyCompleted(true);
     setIsSaving(true);
 
-    voice.stopListening();
-
     try {
+      // Disconnect voice relay immediately so all audio playback & streaming stops instantly
+      await withTimeout(voice.disconnect(), 6000, "voice disconnect");
+
       await Promise.allSettled([
         withTimeout(saveAllDrawings(), 5000, "save drawings"),
         withTimeout(saveAllCodeSnippets(), 5000, "save code snippets"),
@@ -1200,7 +1371,7 @@ export function VoiceInterface({
       try {
         // Stop recording and save artifacts (video mode)
         if (videoMode && recording.isRecording) {
-          const result = await withTimeout(recording.stop(), 8000, "stop recording");
+          const result = await withTimeout(recording.stop(), 90_000, "stop recording");
           await withTimeout(
             fetch("/api/trpc/session.saveRecording", {
               method: "POST",
@@ -1209,20 +1380,19 @@ export function VoiceInterface({
                 json: {
                   sessionId,
                   audioRecordingUrl: result.audioUrl,
+                  videoRecordingUrl: result.videoUrl,
                   audioDuration: result.audioDuration,
                   screenshots: result.screenshots,
                 },
               }),
             }),
-            8000,
+            15_000,
             "save recording",
           );
         }
       } catch (err) {
         console.error("[voice] Failed to save recording:", err);
       }
-
-      await withTimeout(voice.disconnect(), 8000, "voice disconnect");
     } catch (err) {
       console.error("[voice] Failed to end interview cleanly:", err);
     } finally {
@@ -1238,8 +1408,17 @@ export function VoiceInterface({
   useEffect(() => {
     if (remainingSeconds !== 0 || timerExpiredRef.current) return;
     timerExpiredRef.current = true;
-    handleEndInterviewRef.current();
-  }, [remainingSeconds]);
+    if (voice.isConnected && !locallyCompleted) {
+      voice.stopListening();
+      voice.sendTimeExpired();
+      const safetyTimer = setTimeout(() => {
+        handleEndInterviewRef.current();
+      }, 14_000);
+      return () => clearTimeout(safetyTimer);
+    } else {
+      handleEndInterviewRef.current();
+    }
+  }, [remainingSeconds, voice, locallyCompleted]);
 
   // ── Scroll transcript to bottom ─────────────────────────────────
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -1263,10 +1442,6 @@ export function VoiceInterface({
   }, [voice]);
 
   // ── Derived state ───────────────────────────────────────────────
-  const progress =
-    voice.totalQuestions > 0
-      ? ((voice.currentQuestionIndex + 1) / voice.totalQuestions) * 100
-      : 0;
   const lastAssistantMessage = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant") ?? null,
     [messages],
@@ -1294,342 +1469,314 @@ export function VoiceInterface({
   };
   const isTimeLow = remainingSeconds !== null && remainingSeconds <= 60;
 
+  // Auto-complete interview strictly after assistant audio playback has completely finished
   useEffect(() => {
-    if (!farewellReadyToClose || locallyCompleted) return;
+  if (locallyCompleted || voice.isSpeaking) return;
+
+  if (voice.isInterviewComplete || farewellReadyToClose) {
     const timer = setTimeout(() => {
       handleEndInterviewRef.current();
     }, 2000);
     return () => clearTimeout(timer);
-  }, [farewellReadyToClose, locallyCompleted]);
+  }
+}, [voice.isInterviewComplete, farewellReadyToClose, voice.isSpeaking, locallyCompleted]);
+const completionScreen = (
+  <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+    <Card className="w-full max-w-md">
+      <CardContent className="py-12 text-center">
+        <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
+        <h2 className="mt-4 text-2xl font-bold">Thank you!</h2>
+        <p className="mt-2 text-muted-foreground">
+          Your interview has been completed successfully. We appreciate your
+          time and thoughtful responses.
+        </p>
+      </CardContent>
+    </Card>
+  </div>
+);
 
-  useEffect(() => {
-    if (!voice.isInterviewComplete || locallyCompleted || hasVisibleFarewell) return;
-    const timer = setTimeout(() => {
-      handleEndInterviewRef.current();
-    }, 8000);
-    return () => clearTimeout(timer);
-  }, [voice.isInterviewComplete, locallyCompleted, hasVisibleFarewell]);
-  const completionScreen = (
-    <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
-      <Card className="w-full max-w-md">
-        <CardContent className="py-12 text-center">
-          <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
-          <h2 className="mt-4 text-2xl font-bold">Thank you!</h2>
-          <p className="mt-2 text-muted-foreground">
-            Your interview has been completed successfully. We appreciate your
-            time and thoughtful responses.
-          </p>
-        </CardContent>
-      </Card>
-    </div>
-  );
+const sortedQuestions = interviewContext.questions.slice().sort((a, b) => a.order - b.order);
+const currentQVoice = sortedQuestions[voice.currentQuestionIndex];
+const isCodingQuestion = currentQVoice?.type === "CODING";
+const isWhiteboardQuestion = currentQVoice?.type === "WHITEBOARD";
 
-  const sortedQuestions = interviewContext.questions.slice().sort((a, b) => a.order - b.order);
-  const currentQVoice = sortedQuestions[voice.currentQuestionIndex];
-  const currentQuestionText = currentQVoice?.text || "";
-  const isCodingQuestion = currentQVoice?.type === "CODING";
-  const isWhiteboardQuestion = currentQVoice?.type === "WHITEBOARD";
+const codeEditorInitialData = useMemo(() => {
+  const snippet = codeSnippets[activeSnippetIdx];
+  if (snippet?.snapshotData) return snippet.snapshotData;
+  if (currentQVoice?.starterCode?.code) {
+    return JSON.stringify({
+      code: currentQVoice.starterCode.code,
+      language: currentQVoice.starterCode.language,
+    });
+  }
+  return undefined;
+}, [codeSnippets, activeSnippetIdx, currentQVoice]);
 
-  const codeEditorInitialData = useMemo(() => {
-    const snippet = codeSnippets[activeSnippetIdx];
-    if (snippet?.snapshotData) return snippet.snapshotData;
-    if (currentQVoice?.starterCode?.code) {
-      return JSON.stringify({
-        code: currentQVoice.starterCode.code,
-        language: currentQVoice.starterCode.language,
-      });
-    }
-    return undefined;
-  }, [codeSnippets, activeSnippetIdx, currentQVoice]);
+// ── Draggable split handlers ──────────────────────────────
+const handleSplitDividerDown = useCallback((e: React.PointerEvent) => {
+  e.preventDefault();
+  const target = e.currentTarget as HTMLElement;
+  target.setPointerCapture?.(e.pointerId);
+  splitDragging.current = true;
+  const onPointerMove = (ev: PointerEvent) => {
+    if (!splitDragging.current || !splitContainerRef.current) return;
+    const rect = splitContainerRef.current.getBoundingClientRect();
+    const pct = isMobile
+      ? ((ev.clientY - rect.top) / rect.height) * 100
+      : ((ev.clientX - rect.left) / rect.width) * 100;
+    setSplitPercent(Math.min(Math.max(pct, 20), 70));
+  };
+  const onPointerUp = () => {
+    splitDragging.current = false;
+    target.releasePointerCapture?.(e.pointerId);
+    document.removeEventListener("pointermove", onPointerMove);
+    document.removeEventListener("pointerup", onPointerUp);
+  };
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", onPointerUp);
+}, [isMobile]);
 
-  // ── Draggable split handlers ──────────────────────────────
-  const handleSplitDividerDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const target = e.currentTarget as HTMLElement;
-    target.setPointerCapture?.(e.pointerId);
-    splitDragging.current = true;
-    const onPointerMove = (ev: PointerEvent) => {
-      if (!splitDragging.current || !splitContainerRef.current) return;
-      const rect = splitContainerRef.current.getBoundingClientRect();
-      const pct = isMobile
-        ? ((ev.clientY - rect.top) / rect.height) * 100
-        : ((ev.clientX - rect.left) / rect.width) * 100;
-      setSplitPercent(Math.min(Math.max(pct, 20), 70));
-    };
-    const onPointerUp = () => {
-      splitDragging.current = false;
-      target.releasePointerCapture?.(e.pointerId);
-      document.removeEventListener("pointermove", onPointerMove);
-      document.removeEventListener("pointerup", onPointerUp);
-    };
-    document.addEventListener("pointermove", onPointerMove);
-    document.addEventListener("pointerup", onPointerUp);
-  }, [isMobile]);
+// Voice view: vertical split (voice vs transcript) on mobile
+const handleVoiceTranscriptSplitDown = useCallback((e: React.PointerEvent) => {
+  e.preventDefault();
+  const target = e.currentTarget as HTMLElement;
+  target.setPointerCapture?.(e.pointerId);
+  splitDragging.current = true;
+  const onPointerMove = (ev: PointerEvent) => {
+    if (!splitDragging.current || !voiceSplitContainerRef.current) return;
+    const rect = voiceSplitContainerRef.current.getBoundingClientRect();
+    const pct = ((ev.clientY - rect.top) / rect.height) * 100;
+    setSplitPercent(Math.min(Math.max(pct, 20), 70));
+  };
+  const onPointerUp = () => {
+    splitDragging.current = false;
+    target.releasePointerCapture?.(e.pointerId);
+    document.removeEventListener("pointermove", onPointerMove);
+    document.removeEventListener("pointerup", onPointerUp);
+  };
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", onPointerUp);
+}, []);
 
-  // Voice view: vertical split (voice vs transcript) on mobile
-  const handleVoiceTranscriptSplitDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const target = e.currentTarget as HTMLElement;
-    target.setPointerCapture?.(e.pointerId);
-    splitDragging.current = true;
-    const onPointerMove = (ev: PointerEvent) => {
-      if (!splitDragging.current || !voiceSplitContainerRef.current) return;
-      const rect = voiceSplitContainerRef.current.getBoundingClientRect();
-      const pct = ((ev.clientY - rect.top) / rect.height) * 100;
-      setSplitPercent(Math.min(Math.max(pct, 20), 70));
-    };
-    const onPointerUp = () => {
-      splitDragging.current = false;
-      target.releasePointerCapture?.(e.pointerId);
-      document.removeEventListener("pointermove", onPointerMove);
-      document.removeEventListener("pointerup", onPointerUp);
-    };
-    document.addEventListener("pointermove", onPointerMove);
-    document.addEventListener("pointerup", onPointerUp);
-  }, []);
+// Auto-activate editor and save/restore per-question content
+const prevQIndexRef = useRef(voice.currentQuestionIndex);
+useEffect(() => {
+  const prevIdx = prevQIndexRef.current;
+  const newIdx = voice.currentQuestionIndex;
+  const questionChanged = prevIdx !== newIdx;
 
-  // Auto-activate editor and save/restore per-question content
-  const prevQIndexRef = useRef(voice.currentQuestionIndex);
-  useEffect(() => {
-    const prevIdx = prevQIndexRef.current;
-    const newIdx = voice.currentQuestionIndex;
-    const questionChanged = prevIdx !== newIdx;
+  // ── Save outgoing question's content ──
+  if (questionChanged) {
+    const wb = whiteboardRef.current;
+    const ce = codeEditorRef.current;
 
-    // ── Save outgoing question's content ──
-    if (questionChanged) {
-      const wb = whiteboardRef.current;
-      const ce = codeEditorRef.current;
-
-      const savedDrawings = drawings.map((d, i) => {
-        if (i === activeDrawingIdx && wb) {
-          return { ...d, snapshotData: wb.getSnapshotData() ?? d.snapshotData };
-        }
-        return d;
-      });
-      const savedSnippets = codeSnippets.map((s, i) => {
-        if (i === activeSnippetIdx) {
-          const snapshot = ce?.getSnapshotData() ?? liveCodeSnapshotRef.current ?? s.snapshotData;
-          return { ...s, snapshotData: snapshot };
-        }
-        return s;
-      });
-      liveCodeSnapshotRef.current = null;
-
-      questionContentMapRef.current.set(prevIdx, {
-        drawings: savedDrawings,
-        activeDrawingIdx,
-        codeSnippets: savedSnippets,
-        activeSnippetIdx,
-      });
-    }
-
-    // ── Restore incoming question's content (or create fresh) ──
-    if (questionChanged) {
-      const saved = questionContentMapRef.current.get(newIdx);
-      if (saved) {
-        setDrawings(saved.drawings);
-        setActiveDrawingIdx(saved.activeDrawingIdx);
-        setCodeSnippets(saved.codeSnippets);
-        setActiveSnippetIdx(saved.activeSnippetIdx);
-        setTimeout(() => {
-          const activeD = saved.drawings[saved.activeDrawingIdx];
-          if (activeD?.snapshotData) whiteboardRef.current?.loadScene(activeD.snapshotData);
-          else whiteboardRef.current?.resetScene();
-          const activeS = saved.codeSnippets[saved.activeSnippetIdx];
-          if (activeS?.snapshotData) codeEditorRef.current?.loadScene(activeS.snapshotData);
-        }, 400);
-      } else {
-        const freshDrawings = [{ id: crypto.randomUUID(), label: "Drawing 1", snapshotData: null as string | null }];
-        const freshSnippets = [{ id: crypto.randomUUID(), label: "Snippet 1", snapshotData: null as string | null }];
-        setDrawings(freshDrawings);
-        setActiveDrawingIdx(0);
-        setCodeSnippets(freshSnippets);
-        setActiveSnippetIdx(0);
-        setTimeout(() => {
-          whiteboardRef.current?.resetScene();
-        }, 150);
+    const savedDrawings = drawings.map((d, i) => {
+      if (i === activeDrawingIdx && wb) {
+        return { ...d, snapshotData: wb.getSnapshotData() ?? d.snapshotData };
       }
-    }
-
-    // ── Auto-activate/deactivate the appropriate editor on question change ──
-    if (questionChanged) {
-      if (isCodingQuestion) {
-        setCodeEditorActive(true);
-        setWhiteboardActive(false);
-      } else if (isWhiteboardQuestion) {
-        setWhiteboardActive(true);
-        setCodeEditorActive(false);
-      } else {
-        setCodeEditorActive(false);
-        setWhiteboardActive(false);
+      return d;
+    });
+    const savedSnippets = codeSnippets.map((s, i) => {
+      if (i === activeSnippetIdx) {
+        const snapshot = ce?.getSnapshotData() ?? liveCodeSnapshotRef.current ?? s.snapshotData;
+        return { ...s, snapshotData: snapshot };
       }
-    }
+      return s;
+    });
+    liveCodeSnapshotRef.current = null;
 
-    // ── Load starter code for fresh coding questions ──
-    if (
-      isCodingQuestion &&
-      questionChanged &&
-      currentQVoice?.starterCode?.code &&
-      !questionContentMapRef.current.has(newIdx)
-    ) {
-      const starterData = JSON.stringify({
-        code: currentQVoice.starterCode.code,
-        language: currentQVoice.starterCode.language,
-      });
+    questionContentMapRef.current.set(prevIdx, {
+      drawings: savedDrawings,
+      activeDrawingIdx,
+      codeSnippets: savedSnippets,
+      activeSnippetIdx,
+    });
+  }
+
+  // ── Restore incoming question's content (or create fresh) ──
+  if (questionChanged) {
+    const saved = questionContentMapRef.current.get(newIdx);
+    if (saved) {
+      setDrawings(saved.drawings);
+      setActiveDrawingIdx(saved.activeDrawingIdx);
+      setCodeSnippets(saved.codeSnippets);
+      setActiveSnippetIdx(saved.activeSnippetIdx);
       setTimeout(() => {
-        codeEditorRef.current?.loadScene(starterData);
-      }, 300);
+        const activeD = saved.drawings[saved.activeDrawingIdx];
+        if (activeD?.snapshotData) whiteboardRef.current?.loadScene(activeD.snapshotData);
+        else whiteboardRef.current?.resetScene();
+        const activeS = saved.codeSnippets[saved.activeSnippetIdx];
+        if (activeS?.snapshotData) codeEditorRef.current?.loadScene(activeS.snapshotData);
+      }, 400);
+    } else {
+      const freshDrawings = [{ id: crypto.randomUUID(), label: "Drawing 1", snapshotData: null as string | null }];
+      const freshSnippets = [{ id: crypto.randomUUID(), label: "Snippet 1", snapshotData: null as string | null }];
+      setDrawings(freshDrawings);
+      setActiveDrawingIdx(0);
+      setCodeSnippets(freshSnippets);
+      setActiveSnippetIdx(0);
+      setTimeout(() => {
+        whiteboardRef.current?.resetScene();
+      }, 150);
     }
+  }
 
-    prevQIndexRef.current = newIdx;
-  }, [voice.currentQuestionIndex, isCodingQuestion, isWhiteboardQuestion]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Auto-activate the correct editor when voice first connects
-  const initialEditorSetRef = useRef(false);
-  useEffect(() => {
-    if (!voice.isConnected || initialEditorSetRef.current) return;
-    initialEditorSetRef.current = true;
+  // ── Auto-activate/deactivate the appropriate editor on question change ──
+  if (questionChanged) {
     if (isCodingQuestion) {
       setCodeEditorActive(true);
       setWhiteboardActive(false);
     } else if (isWhiteboardQuestion) {
       setWhiteboardActive(true);
       setCodeEditorActive(false);
+    } else {
+      setCodeEditorActive(false);
+      setWhiteboardActive(false);
     }
-  }, [voice.isConnected, isCodingQuestion, isWhiteboardQuestion]);
+  }
 
-  // ── Render ──────────────────────────────────────────────────────
-  return shouldShowCompletionScreen ? completionScreen : (
-    <div className="relative flex h-screen flex-col overflow-hidden bg-background">
-      {/* Saving overlay */}
-      {isSaving && (
-        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-background/80 backdrop-blur-sm">
-          <Loader2 className="h-10 w-10 animate-spin text-primary" />
-          <p className="mt-4 text-lg font-medium">Saving interview data...</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            This will only take a moment.
-          </p>
-        </div>
-      )}
+  // ── Load starter code for fresh coding questions ──
+  if (
+    isCodingQuestion &&
+    questionChanged &&
+    currentQVoice?.starterCode?.code &&
+    !questionContentMapRef.current.has(newIdx)
+  ) {
+    const starterData = JSON.stringify({
+      code: currentQVoice.starterCode.code,
+      language: currentQVoice.starterCode.language,
+    });
+    setTimeout(() => {
+      codeEditorRef.current?.loadScene(starterData);
+    }, 300);
+  }
 
-      {/* Header */}
-      <div className="shrink-0 border-b bg-card px-3 py-2 md:px-6 md:py-3">
-        <div className="flex items-center justify-between">
-          <div className="mr-2 min-w-0 flex-1">
-            <h1 className="truncate text-sm font-semibold md:text-base">{interviewTitle}</h1>
-            <p className="hidden text-xs text-muted-foreground md:block">
-              Voice Interview with {aiName}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {videoMode && recording.isRecording && (
-              <div className="flex items-center gap-1.5 rounded-full bg-destructive/10 px-2.5 py-0.5">
-                <div className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
-                <span className="text-[10px] font-medium text-destructive">REC</span>
-              </div>
+  prevQIndexRef.current = newIdx;
+}, [voice.currentQuestionIndex, isCodingQuestion, isWhiteboardQuestion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+// Auto-activate the correct editor when voice first connects
+const initialEditorSetRef = useRef(false);
+useEffect(() => {
+  if (!voice.isConnected || initialEditorSetRef.current) return;
+  initialEditorSetRef.current = true;
+  if (isCodingQuestion) {
+    setCodeEditorActive(true);
+    setWhiteboardActive(false);
+  } else if (isWhiteboardQuestion) {
+    setWhiteboardActive(true);
+    setCodeEditorActive(false);
+  }
+}, [voice.isConnected, isCodingQuestion, isWhiteboardQuestion]);
+
+// ── Render ──────────────────────────────────────────────────────
+return shouldShowCompletionScreen ? completionScreen : (
+  <div className="relative flex h-screen flex-col overflow-hidden bg-background">
+    {/* Saving overlay */}
+    {isSaving && (
+      <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-background/80 backdrop-blur-sm">
+        <Loader2 className="h-10 w-10 animate-spin text-primary" />
+        <p className="mt-4 text-lg font-medium">Saving interview data...</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          This will only take a moment.
+        </p>
+      </div>
+    )}
+
+    {/* Header */}
+    <div className="shrink-0 border-b bg-card px-3 py-2 md:px-6 md:py-3">
+      <div className="flex items-center justify-between">
+        <div className="mr-2 min-w-0 flex-1">
+          <h1 className="truncate text-sm font-semibold md:text-base">{interviewTitle}</h1>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>Interview with {aiName}</span>
+            {remainingSeconds !== null && (
+              <>
+                <span>•</span>
+                <div
+                  className={`flex items-center gap-1 font-medium tabular-nums ${isTimeLow ? "text-destructive font-semibold" : ""
+                    }`}
+                >
+                  <Clock className="h-3 w-3" />
+                  <span>{formatTime(remainingSeconds)} left</span>
+                </div>
+              </>
             )}
-            <Badge variant={preview ? "outline" : voice.isConnected ? "default" : "secondary"}>
-              {preview ? "Preview" : voice.isConnected ? "Connected" : "Disconnected"}
-            </Badge>
-            <IntervieweeHelpPopover mode="voice" />
           </div>
         </div>
-        {/* Question progress + timer (mobile: timer in header to avoid blocking bottom buttons) */}
-        <div className="mt-2 flex items-center gap-3">
-          <Progress value={progress} className="h-1.5 flex-1" />
-          <span className="shrink-0 text-xs font-medium text-muted-foreground">
-            Q{voice.currentQuestionIndex + 1} / {voice.totalQuestions}
-          </span>
-          {remainingSeconds !== null && isMobile && (
-            <div className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
-              <Clock className="h-3 w-3" />
-              <span>{formatTime(remainingSeconds)} left</span>
+        <div className="flex items-center gap-2">
+          {videoMode && recording.isRecording && (
+            <div className="flex items-center gap-1.5 rounded-full bg-destructive/10 px-2.5 py-0.5">
+              <div className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
+              <span className="text-[10px] font-medium text-destructive">REC</span>
             </div>
           )}
+          <Badge variant={preview ? "outline" : voice.isConnected ? "default" : "secondary"}>
+            {preview ? "Preview" : voice.isConnected ? "In Call" : "Connecting..."}
+          </Badge>
+          <IntervieweeHelpPopover mode="voice" />
         </div>
-        {/* Current question text */}
-        {voice.isConnected && currentQuestionText && (
-          <p className="mt-1.5 text-xs text-muted-foreground line-clamp-1">
-            {currentQuestionText}
-          </p>
-        )}
       </div>
+    </div>
 
-      {/* Error display */}
-      {error && (
-        <div className="mx-6 mt-2 flex items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          {error}
-        </div>
-      )}
+    {/* Error display */}
+    {error && (
+      <div className="mx-6 mt-2 flex items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
+        <AlertCircle className="h-4 w-4 shrink-0" />
+        {error}
+      </div>
+    )}
 
-      {/* Main content: left (voice / whiteboard) + draggable divider + right (transcript) */}
-      <div ref={containerRef} className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Left panel — voice visualization or whiteboard */}
-        <div className="flex min-h-0 flex-1 flex-col" style={isMobile ? undefined : { minWidth: MIN_PANEL_WIDTH }}>
-          {(whiteboardActive || codeEditorActive) ? (
-            /* ── Whiteboard or Code Editor main view ────────────── */
-            <div className="relative flex min-h-0 flex-1 flex-col">
-              {/* Minimized voice status bar */}
-              <div className="flex items-center gap-3 border-b bg-card px-4 py-2">
-                {voice.isSpeaking && (
-                  <div className="flex items-center gap-1.5 text-primary">
-                    <Volume2 className="h-4 w-4 animate-pulse" />
-                    <span className="text-xs font-medium">{aiName} speaking</span>
-                  </div>
-                )}
-                {voice.isListening && (
-                  <div className="flex items-center gap-1.5 text-secondary-500">
-                    <div className="relative h-4 w-4">
-                      <Mic className="absolute inset-0 h-full w-full text-muted-foreground/30" />
-                      <div
-                        className="absolute inset-0 overflow-hidden transition-[clip-path] duration-150 ease-out"
-                        style={{ clipPath: `inset(${(1 - voice.audioLevel) * 100}% 0 0 0)` }}
-                      >
-                        <Mic className="h-full w-full text-secondary-400" />
-                      </div>
+    {/* Main content: left (voice / whiteboard) + draggable divider + right (transcript) */}
+    <div ref={containerRef} className="flex min-h-0 flex-1 overflow-hidden">
+      {/* Left panel — voice visualization or whiteboard */}
+      <div className="flex min-h-0 flex-1 flex-col" style={isMobile ? undefined : { minWidth: MIN_PANEL_WIDTH }}>
+        {(whiteboardActive || codeEditorActive) ? (
+          /* ── Whiteboard or Code Editor main view ────────────── */
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {/* Minimized voice status bar */}
+            <div className="flex items-center gap-3 border-b bg-card px-4 py-2">
+              {voice.isSpeaking && (
+                <div className="flex items-center gap-1.5 text-primary">
+                  <Volume2 className="h-4 w-4 animate-pulse" />
+                  <span className="text-xs font-medium">{aiName} speaking</span>
+                </div>
+              )}
+              {voice.isListening && !voice.isSpeaking && (
+                <div className="flex items-center gap-1.5 text-secondary-500">
+                  <div className="relative h-4 w-4">
+                    <Mic className="absolute inset-0 h-full w-full text-muted-foreground/30" />
+                    <div
+                      className="absolute inset-0 overflow-hidden transition-[clip-path] duration-150 ease-out"
+                      style={{ clipPath: `inset(${(1 - voice.audioLevel) * 100}% 0 0 0)` }}
+                    >
+                      <Mic className="h-full w-full text-secondary-400" />
                     </div>
-                    <span className="text-xs font-medium">Listening</span>
                   </div>
-                )}
-                {voice.isProcessing && (
-                  <div className="flex items-center gap-1.5 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-xs font-medium">Thinking</span>
-                  </div>
-                )}
-                {voice.isTransitioning && (
-                  <div className="flex items-center gap-1.5 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-xs font-medium">
-                      {voice.transitionDirection === "previous" ? "Previous question..." : "Next question..."}
-                    </span>
-                  </div>
-                )}
-                {!voice.isSpeaking && !voice.isListening && !voice.isProcessing && !voice.isTransitioning && (
-                  <span className="text-xs text-muted-foreground">
-                    {voice.isConnected
-                      ? `Voice active — ${whiteboardActive ? "draw" : "code"} freely`
-                      : "Voice disconnected"}
-                  </span>
-                )}
-                {voice.isListening && voice.userTranscript && (
-                  <span className="ml-auto max-w-[50%] truncate text-xs text-muted-foreground italic">
-                    &ldquo;{voice.userTranscript}&rdquo;
-                  </span>
-                )}
-              </div>
-              {/* Tabs — conditional on whiteboard or code editor */}
-              {whiteboardActive ? (
+                </div>
+              )}
+              {!voice.isSpeaking && !voice.isListening && !voice.isProcessing && !voice.isTransitioning && (
+                <span className="text-xs text-muted-foreground">
+                  {voice.isConnected
+                    ? `Voice active — ${whiteboardActive ? "draw" : "code"} freely`
+                    : "Voice disconnected"}
+                </span>
+              )}
+              {voice.isListening && voice.userTranscript && (
+                <span className="ml-auto max-w-[50%] truncate text-xs text-muted-foreground italic">
+                  &ldquo;{voice.userTranscript}&rdquo;
+                </span>
+              )}
+            </div>
+            {/* Tabs — conditional on whiteboard or code editor */}
+            {whiteboardActive ? (
               <div className="flex items-center gap-1 border-b bg-card px-3 py-1.5">
                 {drawings.map((d, i) => (
                   <div
                     key={d.id}
-                    className={`group flex items-center gap-0.5 rounded-md text-xs font-medium transition-colors ${
-                      i === activeDrawingIdx
+                    className={`group flex items-center gap-0.5 rounded-md text-xs font-medium transition-colors ${i === activeDrawingIdx
                         ? "bg-primary text-primary-foreground"
                         : "bg-muted/50 text-muted-foreground hover:bg-muted"
-                    }`}
+                      }`}
                   >
                     {editingDrawingId === d.id ? (
                       <input
@@ -1655,11 +1802,10 @@ export function VoiceInterface({
                     {drawings.length > 1 && (
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteDrawing(i); }}
-                        className={`mr-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 ${
-                          i === activeDrawingIdx
+                        className={`mr-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 ${i === activeDrawingIdx
                             ? "hover:bg-primary-foreground/20"
                             : "hover:bg-muted-foreground/20"
-                        }`}
+                          }`}
                         title="Delete drawing"
                       >
                         <X className="h-3 w-3" />
@@ -1679,11 +1825,10 @@ export function VoiceInterface({
                   <button
                     onClick={handleManualSave}
                     disabled={saveStatus === "saving"}
-                    className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                      saveStatus === "saved"
+                    className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${saveStatus === "saved"
                         ? "text-secondary-600 dark:text-secondary-400"
                         : "text-muted-foreground hover:bg-muted"
-                    }`}
+                      }`}
                     title="Save drawing"
                   >
                     {saveStatus === "saving" ? (
@@ -1697,16 +1842,15 @@ export function VoiceInterface({
                   </button>
                 </div>
               </div>
-              ) : (
+            ) : (
               <div className="flex items-center gap-1 border-b bg-card px-3 py-1.5">
                 {codeSnippets.map((s, i) => (
                   <div
                     key={s.id}
-                    className={`group flex items-center gap-0.5 rounded-md text-xs font-medium transition-colors ${
-                      i === activeSnippetIdx
+                    className={`group flex items-center gap-0.5 rounded-md text-xs font-medium transition-colors ${i === activeSnippetIdx
                         ? "bg-primary text-primary-foreground"
                         : "bg-muted/50 text-muted-foreground hover:bg-muted"
-                    }`}
+                      }`}
                   >
                     {editingSnippetId === s.id ? (
                       <input
@@ -1732,11 +1876,10 @@ export function VoiceInterface({
                     {codeSnippets.length > 1 && (
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteCodeSnippet(i); }}
-                        className={`mr-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 ${
-                          i === activeSnippetIdx
+                        className={`mr-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 ${i === activeSnippetIdx
                             ? "hover:bg-primary-foreground/20"
                             : "hover:bg-muted-foreground/20"
-                        }`}
+                          }`}
                         title="Delete snippet"
                       >
                         <X className="h-3 w-3" />
@@ -1756,11 +1899,10 @@ export function VoiceInterface({
                   <button
                     onClick={handleCodeManualSave}
                     disabled={codeSaveStatus === "saving"}
-                    className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                      codeSaveStatus === "saved"
+                    className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${codeSaveStatus === "saved"
                         ? "text-secondary-600 dark:text-secondary-400"
                         : "text-muted-foreground hover:bg-muted"
-                    }`}
+                      }`}
                     title="Save snippet"
                   >
                     {codeSaveStatus === "saving" ? (
@@ -1774,210 +1916,168 @@ export function VoiceInterface({
                   </button>
                 </div>
               </div>
-              )}
-              {/* Canvas — fills remaining space */}
-              <div className="flex-1 min-h-0">
-                {whiteboardActive && isWhiteboardQuestion && currentQVoice ? (
-                  /* Side-by-side on desktop, stacked on mobile */
-                  <div ref={splitContainerRef} className={isMobile ? "flex h-full flex-col" : "flex h-full"}>
-                    {/* Problem panel */}
-                    <div
-                      className={`min-w-0 shrink-0 overflow-y-auto overflow-x-hidden p-4 code-scrollbar ${isMobile ? "border-b" : ""}`}
-                      style={isMobile ? { height: `${splitPercent}%`, minHeight: 80 } : { width: `${splitPercent}%`, minWidth: 180 }}
-                    >
-                      <div className="mb-3 flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
-                      </div>
-                      <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
-                      {currentQVoice.description && (
-                        <p className="mb-3 text-xs text-muted-foreground whitespace-pre-wrap">{currentQVoice.description}</p>
-                      )}
+            )}
+            {/* Canvas — fills remaining space */}
+            <div className="flex-1 min-h-0">
+              {whiteboardActive && isWhiteboardQuestion && currentQVoice ? (
+                /* Side-by-side on desktop, stacked on mobile */
+                <div ref={splitContainerRef} className={isMobile ? "flex h-full flex-col" : "flex h-full"}>
+                  {/* Problem panel */}
+                  <div
+                    className={`min-w-0 shrink-0 overflow-y-auto overflow-x-hidden p-4 code-scrollbar ${isMobile ? "border-b" : ""}`}
+                    style={isMobile ? { height: `${splitPercent}%`, minHeight: 80 } : { width: `${splitPercent}%`, minWidth: 180 }}
+                  >
+                    <div className="mb-3 flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
                     </div>
-                    {/* Draggable divider */}
-                    <div
-                      className={`group flex items-center justify-center border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20 ${isMobile ? "h-1 cursor-row-resize border-t border-b touch-none" : "w-1 cursor-col-resize border-l border-r touch-none"}`}
-                      onPointerDown={handleSplitDividerDown}
-                    />
-                    {/* Whiteboard */}
-                    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      <WhiteboardCanvas
-                        ref={whiteboardRef}
-                        fillParent
-                        dark={isDark}
-                        onAutoSave={handleWhiteboardAutoSave}
-                        autoSaveInterval={5000}
-                        onDirty={handleWhiteboardDirty}
-                      />
-                    </div>
+                    <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
+                    {currentQVoice.description && (
+                      <p className="mb-3 text-xs text-muted-foreground whitespace-pre-wrap">{currentQVoice.description}</p>
+                    )}
                   </div>
-                ) : whiteboardActive ? (
-                  <WhiteboardCanvas
-                    ref={whiteboardRef}
-                    fillParent
-                    dark={isDark}
-                    onAutoSave={handleWhiteboardAutoSave}
-                    autoSaveInterval={5000}
-                    onDirty={handleWhiteboardDirty}
+                  {/* Draggable divider */}
+                  <div
+                    className={`group flex items-center justify-center border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20 ${isMobile ? "h-1 cursor-row-resize border-t border-b touch-none" : "w-1 cursor-col-resize border-l border-r touch-none"}`}
+                    onPointerDown={handleSplitDividerDown}
                   />
-                ) : codeEditorActive && isCodingQuestion && currentQVoice ? (
-                  /* Side-by-side on desktop, stacked on mobile */
-                  <div ref={splitContainerRef} className={isMobile ? "flex h-full flex-col" : "flex h-full"}>
-                    {/* Problem panel */}
-                    <div
-                      className={`min-w-0 shrink-0 overflow-y-auto overflow-x-hidden p-4 code-scrollbar ${isMobile ? "border-b" : ""}`}
-                      style={isMobile ? { height: `${splitPercent}%`, minHeight: 80 } : { width: `${splitPercent}%`, minWidth: 180 }}
-                    >
-                      <div className="mb-3 flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
-                      </div>
-                      <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
-                      {currentQVoice.description && (
-                        <p className="mb-3 text-xs text-muted-foreground">{currentQVoice.description}</p>
-                      )}
-                      {currentQVoice.starterCode?.code && (
-                        <div className="overflow-hidden rounded-md border bg-zinc-950">
-                          <div className="flex items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
-                            <Code2 className="h-3 w-3 text-zinc-400" />
-                            <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
-                              Starter Code — {currentQVoice.starterCode.language}
-                            </span>
-                          </div>
-                          <CodeBlock code={currentQVoice.starterCode.code} language={currentQVoice.starterCode.language} />
+                  {/* Whiteboard */}
+                  <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                    <WhiteboardCanvas
+                      ref={whiteboardRef}
+                      fillParent
+                      dark={isDark}
+                      onAutoSave={handleWhiteboardAutoSave}
+                      autoSaveInterval={5000}
+                      onDirty={handleWhiteboardDirty}
+                    />
+                  </div>
+                </div>
+              ) : whiteboardActive ? (
+                <WhiteboardCanvas
+                  ref={whiteboardRef}
+                  fillParent
+                  dark={isDark}
+                  onAutoSave={handleWhiteboardAutoSave}
+                  autoSaveInterval={5000}
+                  onDirty={handleWhiteboardDirty}
+                />
+              ) : codeEditorActive && isCodingQuestion && currentQVoice ? (
+                /* Side-by-side on desktop, stacked on mobile */
+                <div ref={splitContainerRef} className={isMobile ? "flex h-full flex-col" : "flex h-full"}>
+                  {/* Problem panel */}
+                  <div
+                    className={`min-w-0 shrink-0 overflow-y-auto overflow-x-hidden p-4 code-scrollbar ${isMobile ? "border-b" : ""}`}
+                    style={isMobile ? { height: `${splitPercent}%`, minHeight: 80 } : { width: `${splitPercent}%`, minWidth: 180 }}
+                  >
+                    <div className="mb-3 flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
+                    </div>
+                    <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
+                    {currentQVoice.description && (
+                      <p className="mb-3 text-xs text-muted-foreground">{currentQVoice.description}</p>
+                    )}
+                    {currentQVoice.starterCode?.code && (
+                      <div className="overflow-hidden rounded-md border bg-zinc-950">
+                        <div className="flex items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
+                          <Code2 className="h-3 w-3 text-zinc-400" />
+                          <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                            Starter Code — {currentQVoice.starterCode.language}
+                          </span>
                         </div>
-                      )}
-                    </div>
-                    {/* Draggable divider */}
-                    <div
-                      className={`group flex items-center justify-center border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20 ${isMobile ? "h-1 cursor-row-resize border-t border-b touch-none" : "w-1 cursor-col-resize border-l border-r touch-none"}`}
-                      onPointerDown={handleSplitDividerDown}
-                    />
-                    {/* Code editor */}
-                    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      <CodeEditorCanvas
-                        key={`code-${voice.currentQuestionIndex}`}
-                        ref={codeEditorRef}
-                        fillParent
-                        dark={isDark}
-                        initialData={codeEditorInitialData}
-                        onAutoSave={handleCodeAutoSave}
-                        autoSaveInterval={5000}
-                        onDirty={handleCodeDirty}
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <CodeEditorCanvas
-                    key={`code-${voice.currentQuestionIndex}`}
-                    ref={codeEditorRef}
-                    fillParent
-                    dark={isDark}
-                    initialData={codeEditorInitialData}
-                    onAutoSave={handleCodeAutoSave}
-                    autoSaveInterval={5000}
-                    onDirty={handleCodeDirty}
-                  />
-                )}
-              </div>
-            </div>
-          ) : (
-            /* ── Voice visualization (mobile: show transcript below when no editor) ── */
-            <div
-              ref={voiceSplitContainerRef}
-              data-tour="voice-status"
-              className={`flex flex-1 flex-col ${isMobile ? "min-h-0" : ""}`}
-            >
-              <div
-                className={`flex flex-col items-center justify-center gap-8 ${
-                  isMobile
-                    ? mobileTranscriptCollapsed
-                      ? "min-h-0 flex-1 py-4"
-                      : "min-h-0 shrink-0 py-4"
-                    : "flex-1"
-                }`}
-                style={
-                  isMobile
-                    ? mobileTranscriptCollapsed
-                      ? { minHeight: 80 }
-                      : { height: `${splitPercent}%`, minHeight: 80 }
-                    : undefined
-                }
-              >
-              {/* Status indicator */}
-              <div className="flex flex-col items-center gap-4">
-                {voice.isTransitioning && (
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    <span className="text-sm font-medium">
-                      {voice.transitionDirection === "previous" ? "Preparing previous question..." : "Preparing next question..."}
-                    </span>
-                  </div>
-                )}
-                {voice.isProcessing && (
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    <span className="text-sm font-medium">Thinking...</span>
-                  </div>
-                )}
-                {voice.isSpeaking && (
-                  <div className="flex items-center gap-2 text-primary">
-                    <Volume2 className="h-5 w-5 animate-pulse" />
-                    <span className="text-sm font-medium">{aiName} is speaking...</span>
-                  </div>
-                )}
-                {voice.isListening && (
-                  <div className="flex flex-col items-center gap-3">
-                    {/* Mic icon with fill level */}
-                    <div className="relative h-10 w-10">
-                      <Mic className="absolute inset-0 h-full w-full text-muted-foreground/30" />
-                      <div
-                        className="absolute inset-0 overflow-hidden transition-[clip-path] duration-150 ease-out"
-                        style={{ clipPath: `inset(${(1 - voice.audioLevel) * 100}% 0 0 0)` }}
-                      >
-                        <Mic className="h-full w-full text-secondary-400" />
+                        <CodeBlock code={currentQVoice.starterCode.code} language={currentQVoice.starterCode.language} />
                       </div>
-                    </div>
-                    <span className="text-sm font-medium text-secondary-500">Listening...</span>
+                    )}
                   </div>
-                )}
-
-                {/* Live transcript while listening */}
-                {voice.isListening && voice.userTranscript && (
-                  <p className="max-w-md text-center text-sm text-muted-foreground">
-                    &ldquo;{voice.userTranscript}&rdquo;
-                  </p>
-                )}
-
-                {/* Audio waveform — driven by real audio level */}
-                {(voice.isSpeaking || voice.isListening) && (
-                  <div className="flex items-center gap-1">
-                    {Array.from({ length: 20 }).map((_, i) => {
-                      const level = voice.isSpeaking ? 0.5 : voice.audioLevel;
-                      const barVariance = Math.sin((i + Date.now() / 200) * 0.7) * 0.3 + 0.7;
-                      return (
-                        <div
-                          key={i}
-                          className={`w-1 rounded-full transition-all duration-150 ${
-                            level > 0.02 ? "bg-primary" : "bg-muted"
-                          }`}
-                          style={{
-                            height: `${8 + level * barVariance * 32}px`,
-                          }}
-                        />
-                      );
-                    })}
+                  {/* Draggable divider */}
+                  <div
+                    className={`group flex items-center justify-center border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20 ${isMobile ? "h-1 cursor-row-resize border-t border-b touch-none" : "w-1 cursor-col-resize border-l border-r touch-none"}`}
+                    onPointerDown={handleSplitDividerDown}
+                  />
+                  {/* Code editor */}
+                  <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                    <CodeEditorCanvas
+                      key={`code-${voice.currentQuestionIndex}`}
+                      ref={codeEditorRef}
+                      fillParent
+                      dark={isDark}
+                      initialData={codeEditorInitialData}
+                      onAutoSave={handleCodeAutoSave}
+                      autoSaveInterval={5000}
+                      onDirty={handleCodeDirty}
+                      onRunCode={handleCodeRun}
+                      onUserTyped={handleUserTyped}
+                    />
                   </div>
-                )}
+                </div>
+              ) : (
+                <CodeEditorCanvas
+                  key={`code-${voice.currentQuestionIndex}`}
+                  ref={codeEditorRef}
+                  fillParent
+                  dark={isDark}
+                  initialData={codeEditorInitialData}
+                  onAutoSave={handleCodeAutoSave}
+                  autoSaveInterval={5000}
+                  onDirty={handleCodeDirty}
+                  onRunCode={handleCodeRun}
+                  onUserTyped={handleUserTyped}
+                />
+              )}
+            </div>
+          </div>
+        ) : (
+          /* ── Voice visualization (mobile: show transcript below when no editor) ── */
+          <div
+            ref={voiceSplitContainerRef}
+            data-tour="voice-status"
+            className={`flex flex-1 flex-col ${isMobile ? "min-h-0" : ""}`}
+          >
+            <div
+              className={`flex flex-col items-center justify-center gap-8 ${isMobile
+                  ? mobileTranscriptCollapsed
+                    ? "min-h-0 flex-1 py-4"
+                    : "min-h-0 shrink-0 py-4"
+                  : "flex-1"
+                }`}
+              style={
+                isMobile
+                  ? mobileTranscriptCollapsed
+                    ? { minHeight: 80 }
+                    : { height: `${splitPercent}%`, minHeight: 80 }
+                  : undefined
+              }
+            >
+              {/* Voice AI Presence Centerpiece */}
+              <div className="flex flex-col items-center justify-center gap-5 w-full max-w-lg px-4">
+                {/* Visual AI Presence Orb */}
+                <div className="relative flex items-center justify-center h-36 w-36">
+                  {/* Subtle Speaking Ripple Rings */}
+                  {voice.isSpeaking && (
+                    <>
+                      <div className="absolute inset-0 rounded-full border border-purple-500/30 animate-ping opacity-60" />
+                      <div className="absolute -inset-3 rounded-full bg-purple-500/10 animate-pulse" />
+                    </>
+                  )}
 
-                {/* AI response text */}
-                {voice.aiTranscript && !voice.isListening && (
-                  <p className="max-w-md text-center text-sm text-muted-foreground italic">
-                    {voice.aiTranscript.length > 200
-                      ? voice.aiTranscript.slice(0, 200) + "..."
-                      : voice.aiTranscript}
-                  </p>
-                )}
+                  {/* Thinking / Processing Celestial Halo */}
+                  {(voice.isProcessing || voice.isTransitioning) && (
+                    <div className="absolute -inset-2 rounded-full border-2 border-purple-400/40 border-t-transparent animate-spin duration-1000" />
+                  )}
+
+                  {/* Center AI Presence Core */}
+                  <div
+                    className={cn(
+                      "relative flex h-28 w-28 items-center justify-center rounded-full shadow-xl transition-all duration-300",
+                      voice.isSpeaking
+                        ? "bg-gradient-to-tr from-purple-600 via-indigo-600 to-violet-500 text-white shadow-purple-500/40 shadow-2xl scale-105"
+                        : "bg-gradient-to-tr from-purple-700 via-indigo-600 to-violet-500 text-white shadow-indigo-500/30"
+                    )}
+                  >
+                    <Sparkles className="h-10 w-10 text-white" />
+                  </div>
+                </div>
               </div>
 
               {!voice.isConnected && !preview && (
@@ -2004,157 +2104,122 @@ export function VoiceInterface({
                 </Button>
               )}
 
-              {!voice.isConnected && !preview && isStartingInterview && (
-                <p className="text-sm text-muted-foreground">
-                  Connecting to the interview. This can take a few seconds.
-                </p>
-              )}
-
-              {preview && (
-                <p className="text-sm text-muted-foreground">
-                  This is where the voice conversation happens
-                </p>
-              )}
-              {voice.isConnected && !voice.isListening && (
-                <p className="text-sm text-muted-foreground">
-                  Click the mic to start speaking
-                </p>
-              )}
-              {voice.isConnected && voice.isListening && !voice.isSpeaking && (
-                <p className="text-sm text-muted-foreground">
-                  Speak naturally — AI will respond automatically
-                </p>
-              )}
-              </div>
-
-              {/* Mobile: draggable divider between voice and transcript */}
-              {isMobile && !mobileTranscriptCollapsed && (
-                <div
-                  className="group flex h-1 shrink-0 cursor-row-resize items-center justify-center border-t border-b border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20 touch-none"
-                  onPointerDown={handleVoiceTranscriptSplitDown}
-                />
-              )}
-
-              {/* Mobile: transcript below voice when no whiteboard/code editor */}
-              {isMobile && (
-                <div
-                  className={
-                    mobileTranscriptCollapsed
-                      ? "mt-auto shrink-0 border-t bg-card"
-                      : "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card"
-                  }
-                >
-                  <button
-                    type="button"
-                    className="flex shrink-0 items-center justify-between border-b px-4 py-2 text-left"
-                    onClick={() => setMobileTranscriptCollapsed((prev) => !prev)}
-                  >
-                    <p className="text-xs font-medium text-muted-foreground">Transcript</p>
-                    {mobileTranscriptCollapsed ? (
-                      <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                    ) : (
-                      <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                    )}
-                  </button>
-                  {!mobileTranscriptCollapsed && (
-                    <ScrollArea className="min-h-0 flex-1">
-                      <div className="space-y-3 p-4">
-                        {preview ? (
-                          <>
-                            <div className="flex items-start gap-1.5 text-sm">
-                              <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                              <div>
-                                <span className="font-medium text-primary">{aiName}:</span>{" "}
-                                Welcome! Let&apos;s begin the interview. Could you start by telling me about yourself?
-                              </div>
-                            </div>
-                            <div className="flex items-start gap-1.5 text-sm">
-                              <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                              <div>
-                                <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                                Sure, I have been working as a software engineer for...
-                              </div>
-                            </div>
-                            <p className="text-center text-xs text-muted-foreground italic">(sample transcript)</p>
-                          </>
-                        ) : messages.length === 0 && !voice.aiTranscript && !voice.userTranscript ? (
-                          <p className="py-8 text-center text-sm text-muted-foreground">
-                            Transcript will appear here once the conversation starts.
-                          </p>
-                        ) : (
-                          <>
-                            {messages.map((msg) => (
-                              <div key={msg.id} className="flex items-start gap-1.5 text-sm">
-                                {msg.role === "user" ? (
-                                  msg.source === "chat"
-                                    ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                    : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                ) : (
-                                  <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                )}
-                                <div>
-                                  <span
-                                    className={`font-medium ${
-                                      msg.role === "user"
-                                        ? "text-secondary-600 dark:text-secondary-400"
-                                        : "text-primary"
-                                    }`}
-                                  >
-                                    {msg.role === "user" ? "You" : aiName}:
-                                  </span>{" "}
-                                  {msg.content}
-                                </div>
-                              </div>
-                            ))}
-                            {voice.userTranscript && (
-                              <div className="flex items-start gap-1.5 text-sm animate-pulse">
-                                <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                <div>
-                                  <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                                  <span className="text-muted-foreground">{voice.userTranscript}</span>
-                                </div>
-                              </div>
-                            )}
-                            {voice.isProcessing && !voice.aiTranscript && (
-                              <div className="flex items-start gap-1.5 text-sm text-muted-foreground">
-                                <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary/60" />
-                                <span className="text-xs italic">Thinking...</span>
-                              </div>
-                            )}
-                            {voice.aiTranscript && (() => {
-                              const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
-                              if (alreadyInMessages) return null;
-                              return (
-                                <div className="flex items-start gap-1.5 text-sm">
-                                  <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                                  <div>
-                                    <span className="font-medium text-primary">{aiName}:</span>{" "}
-                                    <span className="text-muted-foreground">{voice.aiTranscript}</span>
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                          </>
-                        )}
-                      </div>
-                    </ScrollArea>
-                  )}
+              {!voice.isConnected && !preview && !isStartingInterview && (
+                <div className="flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-4 py-1.5 text-xs text-muted-foreground mt-2">
+                  <Headphones className="h-3.5 w-3.5 text-primary shrink-0" />
+                  <span>Using headphones or earbuds is highly recommended for the best experience</span>
                 </div>
               )}
             </div>
-          )}
-        </div>
 
-        {/* ── Draggable divider (desktop only) ────────────────── */}
-        {!isMobile && !desktopTranscriptCollapsed && (
-          <div
-            className="group flex w-1 cursor-col-resize touch-none items-center justify-center border-l border-r border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20"
-            onPointerDown={onDragStart}
-          />
+            {/* Mobile: draggable divider between voice and transcript */}
+            {isMobile && !mobileTranscriptCollapsed && (
+              <div
+                className="group flex h-1 shrink-0 cursor-row-resize items-center justify-center border-t border-b border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20 touch-none"
+                onPointerDown={handleVoiceTranscriptSplitDown}
+              />
+            )}
+
+            {/* Mobile: transcript below voice when no whiteboard/code editor */}
+            {isMobile && (
+              <div
+                className={
+                  mobileTranscriptCollapsed
+                    ? "mt-auto shrink-0 border-t bg-card"
+                    : "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card"
+                }
+              >
+                <button
+                  type="button"
+                  className="flex shrink-0 items-center justify-between border-b px-4 py-2 text-left"
+                  onClick={() => setMobileTranscriptCollapsed((prev) => !prev)}
+                >
+                  <p className="text-xs font-medium text-muted-foreground">Transcript</p>
+                  {mobileTranscriptCollapsed ? (
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  ) : (
+                    <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                  )}
+                </button>
+                {!mobileTranscriptCollapsed && (
+                  <ScrollArea className="min-h-0 flex-1">
+                    <div className="space-y-3 p-4">
+                      {preview ? (
+                        <>
+                          <div className="flex items-start gap-1.5 text-sm">
+                            <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
+                            <div>
+                              <span className="font-medium text-primary">{aiName}:</span>{" "}
+                              Welcome! Let&apos;s begin the interview. Could you start by telling me about yourself?
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-1.5 text-sm">
+                            <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                            <div>
+                              <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
+                              Sure, I have been working as a software engineer for...
+                            </div>
+                          </div>
+                          <p className="text-center text-xs text-muted-foreground italic">(sample transcript)</p>
+                        </>
+                      ) : messages.length === 0 && !voice.aiTranscript && !voice.userTranscript ? (
+                        <p className="py-8 text-center text-sm text-muted-foreground">
+                          Transcript will appear here once the conversation starts.
+                        </p>
+                      ) : (
+                        <>
+                          {messages.map((msg) => (
+                            <div key={msg.id} className="flex items-start gap-1.5 text-sm">
+                              {msg.role === "user" ? (
+                                msg.source === "chat"
+                                  ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                                  : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                              ) : (
+                                <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                              )}
+                              <div>
+                                <span
+                                  className={`font-medium ${msg.role === "user"
+                                      ? "text-secondary-600 dark:text-secondary-400"
+                                      : "text-primary"
+                                    }`}
+                                >
+                                  {msg.role === "user" ? "You" : aiName}:
+                                </span>{" "}
+                                {msg.content}
+                              </div>
+                            </div>
+                          ))}
+                          {voice.userTranscript && (
+                            <div className="flex items-start gap-1.5 text-sm animate-pulse">
+                              <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                              <div>
+                                <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
+                                <span className="text-muted-foreground">{voice.userTranscript}</span>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </ScrollArea>
+                )}
+              </div>
+            )}
+          </div>
         )}
+      </div>
 
-        {/* ── Right panel — Transcript + optional Chat (desktop only) ── */}
-        {!isMobile && (
+      {/* ── Draggable divider (desktop only) ────────────────── */}
+      {!isMobile && !desktopTranscriptCollapsed && (
+        <div
+          className="group flex w-1 cursor-col-resize touch-none items-center justify-center border-l border-r border-border bg-muted/30 transition-colors hover:bg-primary/10 active:bg-primary/20"
+          onPointerDown={onDragStart}
+        />
+      )}
+
+      {/* ── Right panel — Transcript + optional Chat (desktop only) ── */}
+      {!isMobile && (
         <div
           ref={rightPanelRef}
           className="flex min-h-0 shrink-0 flex-col border-l bg-card"
@@ -2231,11 +2296,10 @@ export function VoiceInterface({
                             )}
                             <div>
                               <span
-                                className={`font-medium ${
-                                  msg.role === "user"
+                                className={`font-medium ${msg.role === "user"
                                     ? "text-secondary-600 dark:text-secondary-400"
                                     : "text-primary"
-                                }`}
+                                  }`}
                               >
                                 {msg.role === "user" ? "You" : aiName}:
                               </span>{" "}
@@ -2252,25 +2316,6 @@ export function VoiceInterface({
                             </div>
                           </div>
                         )}
-                        {voice.isProcessing && !voice.aiTranscript && (
-                          <div className="flex items-start gap-1.5 text-sm text-muted-foreground">
-                            <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary/60" />
-                            <span className="text-xs italic">Thinking...</span>
-                          </div>
-                        )}
-                        {voice.aiTranscript && (() => {
-                          const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
-                          if (alreadyInMessages) return null;
-                          return (
-                            <div className="flex items-start gap-1.5 text-sm">
-                              <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                              <div>
-                                <span className="font-medium text-primary">{aiName}:</span>{" "}
-                                <span className="text-muted-foreground">{voice.aiTranscript}</span>
-                              </div>
-                            </div>
-                          );
-                        })()}
                       </>
                     )}
                     <div ref={transcriptEndRef} />
@@ -2346,287 +2391,245 @@ export function VoiceInterface({
             </>
           )}
         </div>
-        )}
-      </div>
-
-      {/* ── Bottom control bar (Zoom-like) ──────────────────── */}
-      {(voice.isConnected || preview) && (
-        <div className={`relative flex items-center justify-center gap-2 border-t bg-card px-3 py-2 md:gap-6 md:px-6${preview ? " pointer-events-none" : ""}`}>
-          {/* Timer — right-aligned on desktop only (mobile shows it in header) */}
-          {remainingSeconds !== null && !isMobile && (
-            <div className={`absolute right-3 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium tabular-nums md:right-6 md:px-2.5 ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
-              <Clock className="h-3.5 w-3.5" />
-              <span>{formatTime(remainingSeconds)} left</span>
-            </div>
-          )}
-          {/* Mic toggle */}
-          <div data-tour="voice-mic" className="flex flex-col items-center gap-0.5">
-            <Button
-              size="icon"
-              variant={voice.isListening ? "default" : "secondary"}
-              className={`h-9 w-9 rounded-full transition-all ${
-                voice.isListening
-                  ? "bg-secondary-500 hover:bg-secondary-600 border-secondary-500"
-                  : ""
-              }`}
-              onClick={() => {
-                if (voice.isListening) {
-                  voice.stopListening();
-                } else {
-                  voice.startListening();
-                }
-              }}
-            >
-              {voice.isListening ? (
-                <Mic className="h-4 w-4" />
-              ) : (
-                <MicOff className="h-4 w-4" />
-              )}
-            </Button>
-            <span className="hidden text-[10px] text-muted-foreground md:block">
-              {voice.isListening ? "Mute" : "Unmute"}
-            </span>
-          </div>
-
-          {/* Chat toggle (mobile: opens transcript+chat sheet; same layout as other icon buttons) */}
-          {chatEnabled && (
-            <div data-tour="voice-chat" className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant={chatOpen ? "default" : "secondary"}
-                className="h-9 w-9 rounded-full"
-                onClick={() => setChatOpen((prev) => !prev)}
-              >
-                <MessageSquare className="h-4 w-4" />
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Chat</span>
-            </div>
-          )}
-
-          {/* Whiteboard + Code Editor toggles */}
-          <div data-tour="voice-tools" className="flex items-center gap-2 md:gap-6">
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant={whiteboardActive ? "default" : "secondary"}
-                className="h-9 w-9 rounded-full"
-                onClick={handleToggleWhiteboard}
-              >
-                <PenLine className="h-4 w-4" />
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Whiteboard</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant={codeEditorActive ? "default" : "secondary"}
-                className="h-9 w-9 rounded-full"
-                onClick={handleToggleCodeEditor}
-              >
-                <Code2 className="h-4 w-4" />
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Code</span>
-            </div>
-          </div>
-
-          {/* Previous / Next / End */}
-          <div data-tour="voice-progress" className="flex items-center gap-2 md:gap-6">
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant="secondary"
-                className="h-9 w-9 rounded-full"
-                onClick={handlePreviousQuestion}
-                disabled={
-                  voice.isTransitioning ||
-                  voice.currentQuestionIndex <= 0
-                }
-              >
-                {voice.isTransitioning && voice.transitionDirection === "previous" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <SkipBack className="h-4 w-4" />
-                )}
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Previous</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant="secondary"
-                className="h-9 w-9 rounded-full"
-                onClick={handleNextQuestion}
-                disabled={
-                  voice.isTransitioning ||
-                  voice.currentQuestionIndex >= voice.totalQuestions - 1
-                }
-              >
-                {voice.isTransitioning && voice.transitionDirection !== "previous" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <SkipForward className="h-4 w-4" />
-                )}
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Next</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant="destructive"
-                className="h-9 w-9 rounded-full"
-                onClick={() => setShowEndDialog(true)}
-              >
-                <PhoneOff className="h-4 w-4" />
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">End</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Camera PIP overlay (video mode) — draggable ────── */}
-      {videoMode && recording.cameraStream && (
-        <DraggablePip>
-          <video
-            ref={cameraPipRef}
-            autoPlay
-            playsInline
-            muted
-            className="h-28 w-36 object-cover"
-            style={{ transform: "scaleX(-1)" }}
-          />
-          <div className="absolute bottom-1 left-1 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5">
-            <Video className="h-2.5 w-2.5 text-white" />
-            <span className="text-[9px] text-white">Camera</span>
-          </div>
-        </DraggablePip>
-      )}
-
-      {/* ── End interview confirmation dialog ─────────────── */}
-      <AlertDialog open={showEndDialog} onOpenChange={setShowEndDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>End interview?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will save your progress and end the current interview session. You won&apos;t be able to continue after this.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={handleEndInterview}
-            >
-              End Interview
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* ── Mobile transcript + chat sheet (replaces separate transcript button) ── */}
-      {isMobile && chatEnabled && (
-        <Sheet open={chatOpen} onOpenChange={setChatOpen}>
-          <SheetContent
-            side="bottom"
-            className="flex h-[60vh] flex-col p-0"
-            onOpenAutoFocus={(e) => e.preventDefault()}
-          >
-            <SheetHeader className="shrink-0 border-b px-4 py-3">
-              <SheetTitle className="text-sm">Chat</SheetTitle>
-            </SheetHeader>
-            <ScrollArea className="min-h-0 flex-1">
-              <div className="space-y-3 p-4">
-                {messages.length === 0 && !voice.aiTranscript && !voice.userTranscript ? (
-                  <p className="py-8 text-center text-sm text-muted-foreground">
-                    Transcript will appear here once the conversation starts.
-                  </p>
-                ) : (
-                  <>
-                    {messages.map((msg) => (
-                      <div key={msg.id} className="flex items-start gap-1.5 text-sm">
-                        {msg.role === "user" ? (
-                          msg.source === "chat"
-                            ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                            : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                        ) : (
-                          <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                        )}
-                        <div>
-                          <span
-                            className={`font-medium ${
-                              msg.role === "user"
-                                ? "text-secondary-600 dark:text-secondary-400"
-                                : "text-primary"
-                            }`}
-                          >
-                            {msg.role === "user" ? "You" : aiName}:
-                          </span>{" "}
-                          {msg.content}
-                        </div>
-                      </div>
-                    ))}
-                    {voice.userTranscript && (
-                      <div className="flex items-start gap-1.5 text-sm animate-pulse">
-                        <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                        <div>
-                          <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                          <span className="text-muted-foreground">{voice.userTranscript}</span>
-                        </div>
-                      </div>
-                    )}
-                    {voice.aiTranscript && (() => {
-                      const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
-                      if (alreadyInMessages) return null;
-                      return (
-                        <div className="flex items-start gap-1.5 text-sm">
-                          <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                          <div>
-                            <span className="font-medium text-primary">{aiName}:</span>{" "}
-                            <span className="text-muted-foreground">{voice.aiTranscript}</span>
-                          </div>
-                        </div>
-                      );
-                    })()}
-                  </>
-                )}
-                <div ref={chatEndRef} />
-              </div>
-            </ScrollArea>
-            <div className="flex shrink-0 items-center gap-2 border-t px-3 py-2">
-              <Input
-                ref={chatInputRef}
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Type a message..."
-                className="h-8 flex-1 text-base md:text-sm"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && chatInput.trim()) {
-                    e.preventDefault();
-                    handleSendChat(chatInput);
-                    setChatInput("");
-                  }
-                }}
-              />
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-7 w-7 shrink-0"
-                disabled={!chatInput.trim()}
-                onClick={() => {
-                  handleSendChat(chatInput);
-                  setChatInput("");
-                  chatInputRef.current?.focus();
-                }}
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          </SheetContent>
-        </Sheet>
       )}
     </div>
-  );
+
+    {/* ── Bottom control bar (Zoom-like) ──────────────────── */}
+    {(voice.isConnected || preview) && (
+      <div className={`relative flex items-center justify-center gap-2 border-t bg-card px-3 py-2 md:gap-6 md:px-6${preview ? " pointer-events-none" : ""}`}>
+        {/* Timer — right-aligned on desktop only (mobile shows it in header) */}
+        {remainingSeconds !== null && !isMobile && (
+          <div className={`absolute right-3 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium tabular-nums md:right-6 md:px-2.5 ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
+            <Clock className="h-3.5 w-3.5" />
+            <span>{formatTime(remainingSeconds)} left</span>
+          </div>
+        )}
+        {/* Mic toggle */}
+        <div data-tour="voice-mic" className="flex flex-col items-center gap-0.5">
+          <Button
+            size="icon"
+            variant={voice.isListening ? "default" : "secondary"}
+            className={`h-9 w-9 rounded-full transition-all ${voice.isListening
+                ? "bg-secondary-500 hover:bg-secondary-600 border-secondary-500"
+                : ""
+              }`}
+            onClick={() => {
+              if (voice.isListening) {
+                voice.stopListening();
+              } else {
+                voice.startListening();
+              }
+            }}
+          >
+            {voice.isListening ? (
+              <Mic className="h-4 w-4" />
+            ) : (
+              <MicOff className="h-4 w-4" />
+            )}
+          </Button>
+          <span className="hidden text-[10px] text-muted-foreground md:block">
+            {voice.isListening ? "Mute" : "Unmute"}
+          </span>
+        </div>
+
+        {/* Chat toggle (mobile: opens transcript+chat sheet; same layout as other icon buttons) */}
+        {chatEnabled && (
+          <div data-tour="voice-chat" className="flex flex-col items-center gap-0.5">
+            <Button
+              size="icon"
+              variant={chatOpen ? "default" : "secondary"}
+              className="h-9 w-9 rounded-full"
+              onClick={() => setChatOpen((prev) => !prev)}
+            >
+              <MessageSquare className="h-4 w-4" />
+            </Button>
+            <span className="hidden text-[10px] text-muted-foreground md:block">Chat</span>
+          </div>
+        )}
+
+        {/* Whiteboard + Code Editor toggles */}
+        <div data-tour="voice-tools" className="flex items-center gap-2 md:gap-6">
+          <div className="flex flex-col items-center gap-0.5">
+            <Button
+              size="icon"
+              variant={whiteboardActive ? "default" : "secondary"}
+              className="h-9 w-9 rounded-full"
+              onClick={handleToggleWhiteboard}
+            >
+              <PenLine className="h-4 w-4" />
+            </Button>
+            <span className="hidden text-[10px] text-muted-foreground md:block">Whiteboard</span>
+          </div>
+
+          <div className="flex flex-col items-center gap-0.5">
+            <Button
+              size="icon"
+              variant={codeEditorActive ? "default" : "secondary"}
+              className="h-9 w-9 rounded-full"
+              onClick={handleToggleCodeEditor}
+            >
+              <Code2 className="h-4 w-4" />
+            </Button>
+            <span className="hidden text-[10px] text-muted-foreground md:block">Code</span>
+          </div>
+        </div>
+
+        {/* End Call */}
+        <div data-tour="voice-progress" className="flex items-center gap-2 md:gap-6">
+          <div className="flex flex-col items-center gap-0.5">
+            <Button
+              size="icon"
+              variant="destructive"
+              className="h-9 w-9 rounded-full"
+              onClick={() => setShowEndDialog(true)}
+            >
+              <PhoneOff className="h-4 w-4" />
+            </Button>
+            <span className="hidden text-[10px] text-muted-foreground md:block">End Call</span>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* ── Camera PIP overlay (video mode) — draggable ────── */}
+    {videoMode && recording.cameraStream && (
+      <DraggablePip>
+        <video
+          ref={cameraPipRef}
+          autoPlay
+          playsInline
+          muted
+          className="h-28 w-36 object-cover"
+          style={{ transform: "scaleX(-1)" }}
+        />
+        <div className="absolute bottom-1 left-1 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5">
+          <Video className="h-2.5 w-2.5 text-white" />
+          <span className="text-[9px] text-white">Camera</span>
+        </div>
+      </DraggablePip>
+    )}
+
+    {/* ── End interview confirmation dialog ─────────────── */}
+    <AlertDialog open={showEndDialog} onOpenChange={setShowEndDialog}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>End interview?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This will save your progress and end the current interview session. You won&apos;t be able to continue after this.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            onClick={handleEndInterview}
+          >
+            End Interview
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+
+    {/* ── Mobile transcript + chat sheet (replaces separate transcript button) ── */}
+    {isMobile && chatEnabled && (
+      <Sheet open={chatOpen} onOpenChange={setChatOpen}>
+        <SheetContent
+          side="bottom"
+          className="flex h-[60vh] flex-col p-0"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
+          <SheetHeader className="shrink-0 border-b px-4 py-3">
+            <SheetTitle className="text-sm">Chat</SheetTitle>
+          </SheetHeader>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="space-y-3 p-4">
+              {messages.length === 0 && !voice.aiTranscript && !voice.userTranscript ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  Transcript will appear here once the conversation starts.
+                </p>
+              ) : (
+                <>
+                  {messages.map((msg) => (
+                    <div key={msg.id} className="flex items-start gap-1.5 text-sm">
+                      {msg.role === "user" ? (
+                        msg.source === "chat"
+                          ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                          : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                      ) : (
+                        <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                      )}
+                      <div>
+                        <span
+                          className={`font-medium ${msg.role === "user"
+                              ? "text-secondary-600 dark:text-secondary-400"
+                              : "text-primary"
+                            }`}
+                        >
+                          {msg.role === "user" ? "You" : aiName}:
+                        </span>{" "}
+                        {msg.content}
+                      </div>
+                    </div>
+                  ))}
+                  {voice.userTranscript && (
+                    <div className="flex items-start gap-1.5 text-sm animate-pulse">
+                      <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                      <div>
+                        <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
+                        <span className="text-muted-foreground">{voice.userTranscript}</span>
+                      </div>
+                    </div>
+                  )}
+                  {voice.aiTranscript && (() => {
+                    const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
+                    if (alreadyInMessages) return null;
+                    return (
+                      <div className="flex items-start gap-1.5 text-sm">
+                        <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
+                        <div>
+                          <span className="font-medium text-primary">{aiName}:</span>{" "}
+                          <span className="text-muted-foreground">{voice.aiTranscript}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+          </ScrollArea>
+          <div className="flex shrink-0 items-center gap-2 border-t px-3 py-2">
+            <Input
+              ref={chatInputRef}
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Type a message..."
+              className="h-8 flex-1 text-base md:text-sm"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && chatInput.trim()) {
+                  e.preventDefault();
+                  handleSendChat(chatInput);
+                  setChatInput("");
+                }
+              }}
+            />
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 shrink-0"
+              disabled={!chatInput.trim()}
+              onClick={() => {
+                handleSendChat(chatInput);
+                setChatInput("");
+                chatInputRef.current?.focus();
+              }}
+            >
+              <Send className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
+    )}
+  </div>
+);
 }

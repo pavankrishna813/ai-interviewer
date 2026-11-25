@@ -398,32 +398,45 @@ export const sessionRouter = router({
         throw new TRPCError({ code: "NOT_FOUND" });
       }
 
-      const { data: existing } = await ctx.supabase
+      let existingMessageId: string | null = null;
+      const { data: existingRows } = await ctx.supabase
         .from("messages")
-        .select("id")
+        .select("id, whiteboardData, content")
         .eq("sessionId", input.sessionId)
-        .eq("contentType", "CODE")
-        .eq("content", input.snippetId)
-        .single();
+        .eq("contentType", "CODE");
+
+      if (existingRows && existingRows.length > 0) {
+        const found = existingRows.find(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (m: any) => m.whiteboardData?.snippetId === input.snippetId || m.content === input.snippetId
+        );
+        if (found) existingMessageId = found.id;
+      }
 
       const parsed = JSON.parse(input.snapshotData);
+      const codeText = parsed?.code || "";
+      const displayContent = codeText
+        ? `[Code Snippet: ${input.label ?? "Code"}]\n\`\`\`${parsed?.language || "javascript"}\n${codeText}\n\`\`\``
+        : `[Code Snippet: ${input.label ?? "Code"}]`;
+
       const msgData = {
         sessionId: input.sessionId,
         role: "USER" as const,
-        content: input.snippetId,
+        content: displayContent,
         contentType: "CODE" as const,
         whiteboardData: {
           ...parsed,
+          snippetId: input.snippetId,
           label: input.label ?? "Code Snippet",
         },
       };
 
       let message;
-      if (existing) {
+      if (existingMessageId) {
         const { data } = await ctx.supabase
           .from("messages")
           .update(msgData)
-          .eq("id", existing.id)
+          .eq("id", existingMessageId)
           .select()
           .single();
         message = data;
@@ -520,7 +533,24 @@ export const sessionRouter = router({
       z.object({
         sessionId: z.string(),
         violation: z.object({
-          type: z.enum(["page_departure", "paste", "multi_screen", "tab_switch", "focus_lost", "copy", "cut"]),
+          type: z.enum([
+            "page_departure",
+            "paste",
+            "multi_screen",
+            "tab_switch",
+            "focus_lost",
+            "copy",
+            "cut",
+            "face_missing",
+            "face_restored",
+            "face_mismatch",
+            "looking_away",
+            "lip_sync_mismatch",
+            "multiple_faces",
+            "no_blinking",
+            "hand_wave_verified",
+            "virtual_device_detected",
+          ]),
           timestamp: z.number(),
           detail: z.string().optional(),
         }),
@@ -686,6 +716,7 @@ export const sessionRouter = router({
       z.object({
         sessionId: z.string(),
         audioRecordingUrl: z.string().optional(),
+        videoRecordingUrl: z.string().optional(),
         audioDuration: z.number().optional(),
         screenshots: z
           .array(
@@ -709,6 +740,18 @@ export const sessionRouter = router({
       }
       if (input.screenshots) {
         updateData.screenshots = input.screenshots;
+      }
+      if (input.videoRecordingUrl) {
+        const { data: currentSession } = await ctx.supabase
+          .from("sessions")
+          .select("insights")
+          .eq("id", input.sessionId)
+          .single();
+        const currentInsights = (currentSession?.insights as Record<string, unknown>) || {};
+        updateData.insights = {
+          ...currentInsights,
+          videoRecordingUrl: input.videoRecordingUrl,
+        };
       }
 
       if (Object.keys(updateData).length === 0) {
