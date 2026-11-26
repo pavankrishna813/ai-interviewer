@@ -34,6 +34,7 @@ export async function GET(request: Request) {
     .from("interviews")
     .select("*, questions(id), sessions(id)")
     .in("projectId", targetProjectIds)
+    .eq("isActive", true)
     .order("updatedAt", { ascending: false })
     .limit(limit + 1);
 
@@ -123,7 +124,87 @@ export async function POST(request: Request) {
     return apiError("BAD_REQUEST", "assessmentCriteria must be an array of { name, description }.", 400);
   }
 
-  const projectId = auth.projectIds[0]!;
+  let projectId = auth.projectIds[0]!;
+
+  // If organizationName or organizationId is passed, resolve or auto-create organization & project
+  const orgNameParam = typeof body.organizationName === "string" ? body.organizationName.trim() : null;
+  const orgIdParam = typeof body.organizationId === "string" ? body.organizationId.trim() : null;
+
+  if (orgIdParam) {
+    const { data: orgProjects } = await supabaseAdmin
+      .from("projects")
+      .select("id")
+      .eq("organizationId", orgIdParam)
+      .limit(1);
+
+    if (orgProjects && orgProjects.length > 0) {
+      projectId = orgProjects[0].id;
+    } else {
+      const { data: createdProj } = await supabaseAdmin
+        .from("projects")
+        .insert({
+          name: "Default Project",
+          organizationId: orgIdParam,
+          createdBy: auth.userId,
+        })
+        .select("id")
+        .single();
+      if (createdProj) projectId = createdProj.id;
+    }
+  } else if (orgNameParam) {
+    const orgSlug = orgNameParam.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || `org-${Date.now()}`;
+    const { data: existingOrgs } = await supabaseAdmin
+      .from("organizations")
+      .select("id")
+      .or(`slug.eq.${orgSlug},name.ilike.${orgNameParam}`)
+      .limit(1);
+
+    let targetOrgId = existingOrgs && existingOrgs.length > 0 ? existingOrgs[0].id : null;
+
+    if (!targetOrgId) {
+      // Auto-create organization account
+      const { data: newOrg } = await supabaseAdmin
+        .from("organizations")
+        .insert({
+          name: orgNameParam,
+          slug: orgSlug,
+          ownerId: auth.userId,
+        })
+        .select("id")
+        .single();
+
+      if (newOrg) {
+        targetOrgId = newOrg.id;
+        await supabaseAdmin.from("organization_members").insert({
+          workspaceId: newOrg.id,
+          userId: auth.userId,
+        });
+      }
+    }
+
+    if (targetOrgId) {
+      const { data: orgProjects } = await supabaseAdmin
+        .from("projects")
+        .select("id")
+        .eq("organizationId", targetOrgId)
+        .limit(1);
+
+      if (orgProjects && orgProjects.length > 0) {
+        projectId = orgProjects[0].id;
+      } else {
+        const { data: createdProj } = await supabaseAdmin
+          .from("projects")
+          .insert({
+            name: "Default Project",
+            organizationId: targetOrgId,
+            createdBy: auth.userId,
+          })
+          .select("id")
+          .single();
+        if (createdProj) projectId = createdProj.id;
+      }
+    }
+  }
 
   const chatEnabled = typeof body.chatEnabled === "boolean" ? body.chatEnabled : true;
   const voiceEnabled = typeof body.voiceEnabled === "boolean" ? body.voiceEnabled : false;
