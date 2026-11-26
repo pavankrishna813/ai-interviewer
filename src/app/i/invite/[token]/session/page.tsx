@@ -137,7 +137,7 @@ export default function InviteSessionPage() {
           durationMinutes={interview.timeLimitMinutes ?? undefined}
           chatEnabled={!!interview.chatEnabled}
           onComplete={handleComplete}
-          videoMode={!!interview.videoEnabled}
+          videoMode={Boolean(interview.videoEnabled || interview.antiCheatingEnabled || interview.voiceEnabled)}
           antiCheatingEnabled={!!interview.antiCheatingEnabled}
         />
       </>

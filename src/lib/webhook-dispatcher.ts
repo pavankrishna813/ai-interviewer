@@ -14,6 +14,9 @@ export interface SessionCompletedPayload {
   score?: number | null;
   summary?: string | null;
   insights?: Record<string, unknown> | null;
+  recordingUrl?: string | null;
+  videoRecordingUrl?: string | null;
+  audioRecordingUrl?: string | null;
 }
 
 export async function dispatchSessionCompletedWebhook(
@@ -22,9 +25,15 @@ export async function dispatchSessionCompletedWebhook(
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
 
-  // 1. Check if candidate notes has troven metadata
+  // 1. Check if candidate notes has platform metadata
   let candidateApplicationId = payload.applicationId;
   let candidateSortname: string | null = null;
+  let targetWebhookUrl =
+    process.env.TROVEN_WEBHOOK_URL ||
+    (process.env.NEXT_PUBLIC_TROVEN_API_URL
+      ? `${process.env.NEXT_PUBLIC_TROVEN_API_URL.replace(/\/$/, "")}/api/v1/webhooks/ai-interview-completed`
+      : "http://localhost:8000/api/v1/webhooks/ai-interview-completed");
+  let webhookSource = "ai-interviewer";
 
   try {
     const { data: cand } = await supabaseAdmin
@@ -42,6 +51,16 @@ export async function dispatchSessionCompletedWebhook(
         if (parsedNotes?.sortname) {
           candidateSortname = parsedNotes.sortname;
         }
+        if (parsedNotes?.webhookUrl) {
+          targetWebhookUrl = parsedNotes.webhookUrl;
+        } else if (parsedNotes?.platform === "skillwallet") {
+          targetWebhookUrl =
+            process.env.SKILLWALLET_WEBHOOK_URL ||
+            "http://localhost:8001/api/v1/webhooks/ai-interview-completed";
+          webhookSource = "skillwallet";
+        } else if (parsedNotes?.platform === "troven") {
+          webhookSource = "troven";
+        }
       } catch {
         // notes was not JSON
       }
@@ -50,27 +69,20 @@ export async function dispatchSessionCompletedWebhook(
     log.warn("Could not query candidate notes for session", err);
   }
 
-  // 2. Default Troven Webhook target
-  const trovenWebhookUrl =
-    process.env.TROVEN_WEBHOOK_URL ||
-    (process.env.NEXT_PUBLIC_TROVEN_API_URL
-      ? `${process.env.NEXT_PUBLIC_TROVEN_API_URL.replace(/\/$/, "")}/api/v1/webhooks/ai-interview-completed`
-      : "http://localhost:8000/api/v1/webhooks/ai-interview-completed");
-
   const enrichedPayload: SessionCompletedPayload = {
     ...payload,
     applicationId: candidateApplicationId || payload.applicationId || null,
   };
 
-  // Dispatch to Troven platform webhook
+  // Dispatch to platform webhook
   tasks.push(
     (async () => {
       try {
-        const res = await fetch(trovenWebhookUrl, {
+        const res = await fetch(targetWebhookUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-webhook-source": "ai-interviewer",
+            "x-webhook-source": webhookSource,
           },
           body: JSON.stringify({
             ...enrichedPayload,
@@ -78,12 +90,12 @@ export async function dispatchSessionCompletedWebhook(
           }),
         });
         if (res.ok) {
-          log.info(`Dispatched session completion to Troven (${trovenWebhookUrl})`);
+          log.info(`Dispatched session completion to ${webhookSource} (${targetWebhookUrl})`);
         } else {
-          log.warn(`Troven webhook returned status ${res.status}`);
+          log.warn(`${webhookSource} webhook returned status ${res.status}`);
         }
       } catch (err) {
-        log.warn(`Failed to connect to Troven webhook at ${trovenWebhookUrl}:`, err);
+        log.warn(`Failed to connect to ${webhookSource} webhook at ${targetWebhookUrl}:`, err);
       }
     })(),
   );

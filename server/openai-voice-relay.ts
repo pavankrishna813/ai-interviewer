@@ -899,7 +899,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   // - 3_500ms (3.5 seconds) after candidate speech ends -> natural interview turnaround without interrupting candidate
   // - 7_000ms (7 seconds) for trailing incomplete thoughts ("and...", "because...", "so...")
   // - 35s initial quiet thinking before offering a gentle check-in
-  const ANSWER_DONE_SILENCE_MS = 3500;
+  const ANSWER_DONE_SILENCE_MS = 7000;
   const INITIAL_THINKING_SILENCE_MS = 35_000;
   let silenceGapTimer: ReturnType<typeof setTimeout> | null = null;
   let userSpokeThisTurn = false;
@@ -1087,2080 +1087,2080 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     return echoCheck.isFullEcho;
   }
 
-      function enableTools() {
-        if (toolsEnabled || !oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
-        toolsEnabled = true;
-        oaiWs.send(JSON.stringify({
-          type: "session.update",
-          session: { type: "realtime", tool_choice: "auto" },
-        }));
-        log.info("Tools enabled (word threshold reached)");
-      }
+  function enableTools() {
+    if (toolsEnabled || !oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+    toolsEnabled = true;
+    oaiWs.send(JSON.stringify({
+      type: "session.update",
+      session: { type: "realtime", tool_choice: "auto" },
+    }));
+    log.info("Tools enabled (word threshold reached)");
+  }
 
-      function disableTools() {
-        // Intentionally keep tools enabled across questions. Explicit user
-        // navigation requests can arrive before the participant gives a
-        // substantive answer, and those should still be able to transition.
-      }
+  function disableTools() {
+    // Intentionally keep tools enabled across questions. Explicit user
+    // navigation requests can arrive before the participant gives a
+    // substantive answer, and those should still be able to transition.
+  }
 
-      let pendingTransitionTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingTransitionTimer: ReturnType<typeof setTimeout> | null = null;
 
-      log.info(`Interview: "${ctx.title}" (${sortedQuestions.length} questions, lang=${ctx.language}, startQ=${currentQuestionIndex})`);
+  log.info(`Interview: "${ctx.title}" (${sortedQuestions.length} questions, lang=${ctx.language}, startQ=${currentQuestionIndex})`);
 
-      function send(msg: Record<string, unknown>) {
-        if (browserWs.readyState === WebSocket.OPEN)
-          browserWs.send(JSON.stringify(msg));
-      }
+  function send(msg: Record<string, unknown>) {
+    if (browserWs.readyState === WebSocket.OPEN)
+      browserWs.send(JSON.stringify(msg));
+  }
 
-      function sendBinary(buf: Buffer) {
-        if (browserWs.readyState === WebSocket.OPEN)
-          browserWs.send(buf, { binary: true });
-      }
+  function sendBinary(buf: Buffer) {
+    if (browserWs.readyState === WebSocket.OPEN)
+      browserWs.send(buf, { binary: true });
+  }
 
-      function clearPendingTransition() {
-        if (pendingTransitionTimer) {
-          clearTimeout(pendingTransitionTimer);
-          pendingTransitionTimer = null;
-        }
-      }
+  function clearPendingTransition() {
+    if (pendingTransitionTimer) {
+      clearTimeout(pendingTransitionTimer);
+      pendingTransitionTimer = null;
+    }
+  }
 
-      function sendQuestionPrompt(prompt: string, retriesLeft = 2) {
-        pendingQuestionPrompt = prompt;
-        if (pendingPromptTimer) clearTimeout(pendingPromptTimer);
+  function sendQuestionPrompt(prompt: string, retriesLeft = 2) {
+    pendingQuestionPrompt = prompt;
+    if (pendingPromptTimer) clearTimeout(pendingPromptTimer);
 
-        if (oaiWs?.readyState === WebSocket.OPEN && !reconnecting) {
-          // Inject as a system message and trigger a response
-          oaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "system",
-              content: [{ type: "input_text", text: prompt }],
-            },
-          }));
-          requestAssistantResponse("question prompt");
-        }
+    if (oaiWs?.readyState === WebSocket.OPEN && !reconnecting) {
+      // Inject as a system message and trigger a response
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: prompt }],
+        },
+      }));
+      requestAssistantResponse("question prompt");
+    }
 
-        pendingPromptTimer = setTimeout(() => {
-          if (!pendingQuestionPrompt) return;
-          if (retriesLeft > 0 && !browserClosed && !interviewDone) {
-            log.warn(`No OpenAI response to question prompt — retrying (${retriesLeft} left)`);
-            sendQuestionPrompt(prompt, retriesLeft - 1);
-          } else {
-            log.warn("OpenAI did not respond to question prompt after retries");
-            pendingQuestionPrompt = null;
-          }
-        }, 5_000);
-      }
-
-      function clearQuestionPrompt() {
+    pendingPromptTimer = setTimeout(() => {
+      if (!pendingQuestionPrompt) return;
+      if (retriesLeft > 0 && !browserClosed && !interviewDone) {
+        log.warn(`No OpenAI response to question prompt — retrying (${retriesLeft} left)`);
+        sendQuestionPrompt(prompt, retriesLeft - 1);
+      } else {
+        log.warn("OpenAI did not respond to question prompt after retries");
         pendingQuestionPrompt = null;
-        if (pendingPromptTimer) {
-          clearTimeout(pendingPromptTimer);
-          pendingPromptTimer = null;
+      }
+    }, 5_000);
+  }
+
+  function clearQuestionPrompt() {
+    pendingQuestionPrompt = null;
+    if (pendingPromptTimer) {
+      clearTimeout(pendingPromptTimer);
+      pendingPromptTimer = null;
+    }
+  }
+
+  function cancelOngoingResponse() {
+    clearSilenceGapTimer();
+    const shouldCancel =
+      responseInFlight ||
+      responseAudioStarted ||
+      modelIsSpeaking ||
+      !!outputTranscriptBuffer;
+    if (shouldCancel && oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+      responseInFlight = false;
+      oaiWs.send(JSON.stringify({ type: "response.cancel" }));
+    }
+    outputTranscriptBuffer = "";
+    pendingTtsText = [];
+    responseTtsBytes = 0;
+    responseAudioStarted = false;
+    responseAudioStartedAt = 0;
+    modelIsSpeaking = false;
+    lastAssistantAudioEndedAt = Date.now();
+    ttsPlaybackEndsAt = 0;
+  }
+
+  function requestAssistantResponse(reason: string, response?: Record<string, unknown>) {
+    clearSilenceGapTimer();
+    if (
+      !oaiWs ||
+      oaiWs.readyState !== WebSocket.OPEN ||
+      reconnecting ||
+      isTransitioning ||
+      (interviewDone && !pendingInterviewComplete)
+    ) {
+      return;
+    }
+    if (responseInFlight || modelIsSpeaking) {
+      // Never queue redundant proctor interventions, silence nudges, or duplicate questions
+      // while the assistant is already speaking or currently generating a response!
+      if (
+        reason.includes("proctor") ||
+        reason.includes("silence gap") ||
+        reason.includes("nudge") ||
+        reason.includes("engagement")
+      ) {
+        log.info(`Dropped redundant assistant request (${reason}) while model is speaking or in-flight`);
+        return;
+      }
+      queuedAssistantResponse = { reason, response };
+      log.info(`Queued assistant response (${reason}) while another response is active`);
+      return;
+    }
+    const payload = response
+      ? { type: "response.create", response }
+      : { type: "response.create" };
+    responseInFlight = true;
+    oaiWs.send(JSON.stringify(payload));
+    log.info(`Requested assistant response (${reason})`);
+  }
+
+  function takeQueuedAssistantResponse() {
+    const next = queuedAssistantResponse;
+    queuedAssistantResponse = null;
+    return next;
+  }
+
+  function deliverProctorDisruption(alertType: string, detail: string) {
+    const isCoding = sortedQuestions[currentQuestionIndex]?.type === "CODING";
+    const now = Date.now();
+    const lastTypeSpoken = lastProctorTypeSpokenAt[alertType] || 0;
+
+    const decision = shouldDisruptForProctorAlert({
+      alertType,
+      isCoding,
+      nowMs: now,
+      lastProctorSpokenAt,
+      lastTypeSpokenAt: lastTypeSpoken,
+    });
+
+    if (!decision.shouldDisrupt) {
+      log.info(`[proctor] Skipped spoken disruption for ${alertType} (reason: ${decision.reason})`);
+      return;
+    }
+
+    lastProctorSpokenAt = now;
+    lastProctorTypeSpokenAt[alertType] = now;
+    pendingProctorAlert = null;
+
+    log.warn(`[proctor] Disrupting candidate with spoken intervention for ${alertType}`);
+
+    // 1. Immediately halt current assistant speech/output and cut browser audio
+    cancelOngoingResponse();
+    send({ type: "interrupt" });
+
+    // 2. Clear candidate audio and state so speech before disruption does not leak into next answer
+    inputTranscriptBuffer = "";
+    volcAsrAccumulator = "";
+    userSpeechGateOpen = false;
+    userSpeechPeakRmsThisSegment = 0;
+    clearSilenceGapTimer();
+    clearSpeechFinalizeTimer();
+    if (oaiWs?.readyState === WebSocket.OPEN) {
+      oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+    }
+
+    // 3. Generate natural spoken warning text
+    const spokenWarning = buildProctorWarningText(alertType, isZh, detail);
+
+    // 4. Queue spoken instruction to OpenAI Realtime
+    if (oaiWs?.readyState === WebSocket.OPEN && !browserClosed && !interviewDone) {
+      const curQ = sortedQuestions[currentQuestionIndex];
+      const resumeNote = !firstQuestionAsked
+        ? (isZh
+          ? `提醒候选人后，只需礼貌询问：“请调整好摄像头确保面部清晰可见，并确认一下能听到我说话吗？” 绝不要提前进入第一道专业题目！`
+          : `After delivering this warning, simply say: "Please adjust your camera so you are clearly visible, and let me know if you can hear me loud and clear." DO NOT recite any technical interview questions yet!`)
+        : (curQ?.text
+          ? (isZh
+            ? `提醒候选人后，只需简明温和地说：“调整好后我们随时继续，按你的节奏来。” 严禁把整道题目重新朗读或复述！`
+            : `After delivering this warning, simply reassure them: "Whenever you're set, we can keep going—take your time!" CRITICAL: DO NOT re-read or recite the full interview question text again!`)
+          : (isZh
+            ? `提醒候选人后，温和地邀请对方在准备好时继续作答。`
+            : `After delivering this warning, briefly and warmly invite the candidate to continue their response when ready.`));
+
+      pushHistory("assistant", spokenWarning);
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{
+            type: "input_text",
+            text: isZh
+              ? `[SYSTEM INSTRUCTION - IMMEDIATE PROCTORING DISRUPTION]: 检测到监考异常：“${alertType}”（${detail}）。请立即以温和、专业、自然的考官语气对候选人说出以下提醒，绝不要生硬严厉：\n“${spokenWarning}”\n${resumeNote}`
+              : `[SYSTEM INSTRUCTION - IMMEDIATE PROCTORING DISRUPTION]: A proctoring violation occurred: "${alertType}" (${detail}). Immediately speak this warning to the candidate in a calm, polite, and professional tone:\n"${spokenWarning}"\n${resumeNote}`,
+          }],
+        },
+      }));
+      requestAssistantResponse("proctor violation disruption");
+    }
+  }
+
+  function normalizeAsrGuardText(text: string): string {
+    return text.toLowerCase().replace(/[^\w\u4e00-\u9fff]+/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function shouldIgnoreStaleAsrText(text: string): boolean {
+    if (!staleAsrGuardText || Date.now() > staleAsrGuardUntil) return false;
+    const incoming = normalizeAsrGuardText(text);
+    const previous = normalizeAsrGuardText(staleAsrGuardText);
+    if (!incoming || !previous) return false;
+    if (incoming === previous) return true;
+    if (incoming.length >= 8 && previous.includes(incoming)) return true;
+    if (previous.length >= 8 && incoming.includes(previous)) return true;
+    return false;
+  }
+
+  function armStaleAsrGuard(text: string) {
+    staleAsrGuardText = text;
+    staleAsrGuardUntil = Date.now() + STALE_ASR_GUARD_MS;
+  }
+
+  function clearStaleAsrGuard() {
+    staleAsrGuardText = "";
+    staleAsrGuardUntil = 0;
+  }
+
+  function handleCommittedUserText(committedText: string, reason: string): boolean {
+    if (tryHandleExplicitUserNavigation(committedText)) {
+      return true;
+    }
+
+    if (isRepeatOrClarificationRequest(committedText)) {
+      log.info(`Candidate requested question repeat/clarification: "${committedText}"`);
+      if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+        try {
+          oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+        } catch {
+          // ignore
         }
+        oaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{
+              type: "input_text",
+              text: isZh
+                ? `[SYSTEM] 候选人刚才请求重复刚才的问题（"${committedText}"）。请以温和清晰的口吻重新阐述或举例说明你刚才提出的问题或探讨点。切勿跳回开场白或第一题。`
+                : `[SYSTEM] The candidate asked you to repeat or clarify what you just asked ("${committedText}"). Warmly and clearly repeat or rephrase the question or topic you just asked about in simple terms. Do NOT revert back to question 1 or previous introductory topics.`,
+            }],
+          },
+        }));
+        requestAssistantResponse("candidate requested question repetition");
+      }
+      return true;
+    }
+
+    const currentQuestion = sortedQuestions[currentQuestionIndex];
+    if (
+      currentQuestion &&
+      (currentQuestion.type === "CODING" || currentQuestion.type === "WHITEBOARD") &&
+      isCodingDoneSignal(committedText) &&
+      oaiWs &&
+      oaiWs.readyState === WebSocket.OPEN
+    ) {
+      const codeSnippet = latestCode.trim()
+        ? `\n\nHere is the candidate's current code in the editor (${latestCodeLanguage}):\n\`\`\`${latestCodeLanguage}\n${latestCode.slice(0, 2000)}\n\`\`\`\nConduct a direct oral code review right now:\n- Name specific functions, variables, or methods they wrote (e.g. filter, modulo, etc.).\n- Acknowledge what their code accomplishes.\n- Probe them on edge cases, failure modes, and time/space complexity (e.g. O(n)).`
+        : `\nAcknowledge their completion and invite them to explain their logic, tradeoffs, and complexity.`;
+
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{
+            type: "input_text",
+            text: `[SYSTEM] The candidate completed their coding task.${codeSnippet}`,
+          }],
+        },
+      }));
+    } else if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+      try {
+        oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+      } catch {
+        // ignore
       }
 
-      function cancelOngoingResponse() {
-        clearSilenceGapTimer();
-        const shouldCancel =
-          responseInFlight ||
-          responseAudioStarted ||
-          modelIsSpeaking ||
-          !!outputTranscriptBuffer;
-        if (shouldCancel && oaiWs && oaiWs.readyState === WebSocket.OPEN) {
-          responseInFlight = false;
-          oaiWs.send(JSON.stringify({ type: "response.cancel" }));
-        }
-        outputTranscriptBuffer = "";
-        pendingTtsText = [];
-        responseTtsBytes = 0;
-        responseAudioStarted = false;
-        responseAudioStartedAt = 0;
-        modelIsSpeaking = false;
-        lastAssistantAudioEndedAt = Date.now();
-        ttsPlaybackEndsAt = 0;
+      nudgeCountThisQuestion = 0;
+      if (!firstQuestionAsked) {
+        firstQuestionAsked = true;
+        const firstQText = sortedQuestions[0]?.text || "";
+        oaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{
+              type: "input_text",
+              text: isZh
+                ? `[SYSTEM] 候选人已回应（"${committedText}"）。绝对不要重复问候，也不要再次询问能否听清！请热情确认对方声音清晰（如："太好了，声音非常清晰！"），并立即正式介绍${ctx.title}并提出第一道题目："${firstQText}"。切勿在提问前说"话筒交给你"或沉默等待。`
+                : `[SYSTEM] The candidate has responded ("${committedText}"). CRITICAL: DO NOT repeat the opening greeting and DO NOT ask "can you hear me" again! Confirm enthusiastically that you can hear them (e.g., "Awesome, loud and clear!"), seamlessly introduce ${ctx.title}, and immediately ask Question 1: "${firstQText}". DO NOT say "the floor is yours" before asking the question!`,
+            }],
+          },
+        }));
       }
 
-      function requestAssistantResponse(reason: string, response?: Record<string, unknown>) {
-        clearSilenceGapTimer();
-        if (
-          !oaiWs ||
-          oaiWs.readyState !== WebSocket.OPEN ||
-          reconnecting ||
-          isTransitioning ||
-          (interviewDone && !pendingInterviewComplete)
-        ) {
-          return;
-        }
-        if (responseInFlight || modelIsSpeaking) {
-          // Never queue redundant proctor interventions, silence nudges, or duplicate questions
-          // while the assistant is already speaking or currently generating a response!
-          if (
-            reason.includes("proctor") ||
-            reason.includes("silence gap") ||
-            reason.includes("nudge") ||
-            reason.includes("engagement")
-          ) {
-            log.info(`Dropped redundant assistant request (${reason}) while model is speaking or in-flight`);
-            return;
-          }
-          queuedAssistantResponse = { reason, response };
-          log.info(`Queued assistant response (${reason}) while another response is active`);
-          return;
-        }
-        const payload = response
-          ? { type: "response.create", response }
-          : { type: "response.create" };
-        responseInFlight = true;
-        oaiWs.send(JSON.stringify(payload));
-        log.info(`Requested assistant response (${reason})`);
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: committedText }],
+        },
+      }));
+    }
+    requestAssistantResponse(reason);
+    return false;
+  }
+
+  function clearSpeechFinalizeTimer() {
+    if (pendingSpeechFinalize) {
+      clearTimeout(pendingSpeechFinalize);
+      pendingSpeechFinalize = null;
+    }
+  }
+
+  function bestAvailableTranscript(): string {
+    return mergeAsrText(inputTranscriptBuffer, volcAsrAccumulator).trim();
+  }
+
+  function noteTranscriptUpdate() {
+    lastTranscriptUpdateAt = Date.now();
+    const text = bestAvailableTranscript();
+    if (!vadSpeechActive && !speechTranscriptCommitted && text) {
+      if (isAnswerDoneSignal(text) || isCodingDoneSignal(text)) {
+        log.info(`Verbal completion signal detected in ASR update: "${text}" — scheduling immediate finalize`);
+        scheduleSpeechFinalize("verbal completion", 150);
       }
+    }
+  }
 
-      function takeQueuedAssistantResponse() {
-        const next = queuedAssistantResponse;
-        queuedAssistantResponse = null;
-        return next;
-      }
+  function transcriptLooksStable(now = Date.now()): boolean {
+    if (!lastTranscriptUpdateAt) return true;
+    const sinceUpdate = now - lastTranscriptUpdateAt;
+    const sinceSpeechStop = lastVadSpeechEnd ? now - lastVadSpeechEnd : Number.POSITIVE_INFINITY;
+    return sinceUpdate >= USER_TRANSCRIPT_STABILITY_MS || sinceSpeechStop >= USER_TRANSCRIPT_MAX_WAIT_MS;
+  }
 
-      function deliverProctorDisruption(alertType: string, detail: string) {
-        const isCoding = sortedQuestions[currentQuestionIndex]?.type === "CODING";
-        const now = Date.now();
-        const lastTypeSpoken = lastProctorTypeSpokenAt[alertType] || 0;
+  let lastCommittedUserTranscript = "";
+  let lastCommittedUserTranscriptAt = 0;
 
-        const decision = shouldDisruptForProctorAlert({
-          alertType,
-          isCoding,
-          nowMs: now,
-          lastProctorSpokenAt,
-          lastTypeSpokenAt: lastTypeSpoken,
-        });
+  function commitUserTranscript(reason: string): string {
+    clearSpeechFinalizeTimer();
+    if (speechTranscriptCommitted) return "";
 
-        if (!decision.shouldDisrupt) {
-          log.info(`[proctor] Skipped spoken disruption for ${alertType} (reason: ${decision.reason})`);
-          return;
-        }
+    let committedText = bestAvailableTranscript();
+    if (!committedText) return "";
 
-        lastProctorSpokenAt = now;
-        lastProctorTypeSpokenAt[alertType] = now;
-        pendingProctorAlert = null;
+    const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
+    if (isEchoWindow) {
+      const recentAssistant = [
+        outputTranscriptBuffer,
+        ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
+      ].filter(Boolean);
 
-        log.warn(`[proctor] Disrupting candidate with spoken intervention for ${alertType}`);
-
-        // 1. Immediately halt current assistant speech/output and cut browser audio
-        cancelOngoingResponse();
-        send({ type: "interrupt" });
-
-        // 2. Clear candidate audio and state so speech before disruption does not leak into next answer
+      const echoCheck = stripAssistantEcho(committedText, recentAssistant);
+      if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+        log.info(`commitUserTranscript dropped (full echo): ${JSON.stringify(committedText)}`);
         inputTranscriptBuffer = "";
         volcAsrAccumulator = "";
-        userSpeechGateOpen = false;
-        userSpeechPeakRmsThisSegment = 0;
-        clearSilenceGapTimer();
-        clearSpeechFinalizeTimer();
-        if (oaiWs?.readyState === WebSocket.OPEN) {
-          oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-        }
+        return "";
+      }
+      committedText = echoCheck.cleanedText;
+    }
 
-        // 3. Generate natural spoken warning text
-        const spokenWarning = buildProctorWarningText(alertType, isZh, detail);
+    if (isWhisperHallucination(committedText, ctx.language)) {
+      log.info(`Dropped hallucination in commitUserTranscript (${reason}): ${JSON.stringify(committedText)}`);
+      inputTranscriptBuffer = "";
+      volcAsrAccumulator = "";
+      return "";
+    }
 
-        // 4. Queue spoken instruction to OpenAI Realtime
-        if (oaiWs?.readyState === WebSocket.OPEN && !browserClosed && !interviewDone) {
-          const curQ = sortedQuestions[currentQuestionIndex];
-          const resumeNote = !firstQuestionAsked
-            ? (isZh
-                ? `提醒候选人后，只需礼貌询问：“请调整好摄像头确保面部清晰可见，并确认一下能听到我说话吗？” 绝不要提前进入第一道专业题目！`
-                : `After delivering this warning, simply say: "Please adjust your camera so you are clearly visible, and let me know if you can hear me loud and clear." DO NOT recite any technical interview questions yet!`)
-            : (curQ?.text
-                ? (isZh
-                    ? `提醒候选人后，只需简明温和地说：“调整好后我们随时继续，按你的节奏来。” 严禁把整道题目重新朗读或复述！`
-                    : `After delivering this warning, simply reassure them: "Whenever you're set, we can keep going—take your time!" CRITICAL: DO NOT re-read or recite the full interview question text again!`)
-                : (isZh
-                    ? `提醒候选人后，温和地邀请对方在准备好时继续作答。`
-                    : `After delivering this warning, briefly and warmly invite the candidate to continue their response when ready.`));
+    if (!hasRealUserSpeech()) {
+      log.info(`Dropped committed transcript on silence / no vocal energy (${reason}): ${JSON.stringify(committedText)}`);
+      inputTranscriptBuffer = "";
+      volcAsrAccumulator = "";
+      return "";
+    }
 
-          pushHistory("assistant", spokenWarning);
-          oaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "system",
-              content: [{
+    userSpokeThisTurn = true;
+    nudgeCountThisQuestion = 0;
+    speechTranscriptCommitted = true;
+    lastCommittedUserTranscript = committedText;
+    lastCommittedUserTranscriptAt = Date.now();
+    pushHistory("user", committedText);
+    send({ type: "asr_ended", text: committedText });
+    log.info(`Committed user transcript (${reason}): ${JSON.stringify(committedText)}`);
+    inputTranscriptBuffer = "";
+    volcAsrAccumulator = "";
+    lastTranscriptUpdateAt = 0;
+    armStaleAsrGuard(committedText);
+    // Reset valid speech segment so trailing silence cannot piggyback on this speech
+    lastValidSpeechSegmentDuration = 0;
+    lastValidSpeechSegmentPeakRms = 0;
+    lastValidSpeechSegmentEndedAt = 0;
+    return committedText;
+  }
+
+  function scheduleSpeechFinalize(reason: string, delayMs = 15_000) {
+    clearSpeechFinalizeTimer();
+    pendingSpeechFinalize = setTimeout(() => {
+      pendingSpeechFinalize = null;
+      if (speechTranscriptCommitted || !bestAvailableTranscript()) return;
+      if (!transcriptLooksStable()) {
+        const now = Date.now();
+        const waitForStability = Math.max(
+          150,
+          USER_TRANSCRIPT_STABILITY_MS - (now - lastTranscriptUpdateAt),
+        );
+        const waitForCap = lastVadSpeechEnd
+          ? Math.max(150, USER_TRANSCRIPT_MAX_WAIT_MS - (now - lastVadSpeechEnd))
+          : USER_TRANSCRIPT_STABILITY_MS;
+        scheduleSpeechFinalize(reason, Math.min(waitForStability, waitForCap));
+        return;
+      }
+      finalizeUserTurn(reason);
+    }, delayMs);
+  }
+
+  function finalizeUserTurn(reason: string, requestResponse = true): string {
+    const committed = commitUserTranscript(reason);
+    if (committed && requestResponse) {
+      handleCommittedUserText(committed, reason);
+    }
+    return committed;
+  }
+
+  function clearSilenceGapTimer() {
+    if (silenceGapTimer) {
+      clearTimeout(silenceGapTimer);
+      silenceGapTimer = null;
+    }
+  }
+
+  function startSilenceGapTimer(delayMs = INITIAL_THINKING_SILENCE_MS) {
+    clearSilenceGapTimer();
+    if (browserClosed || interviewDone || isTransitioning || modelIsSpeaking || responseInFlight) {
+      return;
+    }
+    silenceGapTimer = setTimeout(() => {
+      silenceGapTimer = null;
+      handleSilenceGapTimeout();
+    }, delayMs);
+  }
+
+  function handleSilenceGapTimeout() {
+    if (browserClosed || interviewDone || isTransitioning) {
+      return;
+    }
+    const now = Date.now();
+    // Watchdog: reset stuck vadSpeechActive if there has been no vocal energy or new transcript for >3.5s
+    if (
+      vadSpeechActive &&
+      !hasRealUserSpeech(now) &&
+      (now - lastTranscriptUpdateAt > 3500 || lastTranscriptUpdateAt === 0)
+    ) {
+      log.warn("handleSilenceGapTimeout: VAD flagged active without genuine speech energy or transcripts — resetting vadSpeechActive");
+      vadSpeechActive = false;
+    }
+    if (now < ttsPlaybackEndsAt) {
+      const waitMs = Math.max(2000, ttsPlaybackEndsAt - now + 2000);
+      log.info(`handleSilenceGapTimeout: audio still playing in browser (${waitMs}ms remaining) — deferring silence check`);
+      startSilenceGapTimer(waitMs);
+      return;
+    }
+    if (modelIsSpeaking || responseAudioStarted || responseInFlight || vadSpeechActive) {
+      // Assistant is speaking or audio is in flight — re-poll silence in 2s so the timer never dies
+      startSilenceGapTimer(2000);
+      return;
+    }
+    if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+
+    // 1. If there is uncommitted speech in the buffer, flush and commit it
+    if (!speechTranscriptCommitted && bestAvailableTranscript()) {
+      log.info("Silence gap: flushing pending user transcript");
+      const committed = finalizeUserTurn("silence gap - flush");
+      if (committed) return;
+    }
+
+    const currentQuestion = sortedQuestions[currentQuestionIndex];
+    const isCodingOrWhiteboard =
+      currentQuestion &&
+      (currentQuestion.type === "CODING" || currentQuestion.type === "WHITEBOARD");
+
+    // 2. If user already spoke during this turn:
+    // Consider the answer is DONE after silence gap (natural turnaround with thinking space)!
+    if (userSpokeThisTurn) {
+      const pendingCheck = bestAvailableTranscript() || inputTranscriptBuffer || volcAsrAccumulator || "";
+      if (hasTrailingIncompleteThought(pendingCheck) && !trailingConjunctionBuffered) {
+        trailingConjunctionBuffered = true;
+        log.info(`Trailing conjunction detected in "${pendingCheck.slice(-30)}" at silence gap — adding 3500ms extra thinking buffer`);
+        startSilenceGapTimer(3500);
+        return;
+      }
+      trailingConjunctionBuffered = false;
+
+      // If the candidate only gave a brief acknowledgment or filler (< 6 words, e.g. "Let me think"),
+      // do NOT interrupt immediately. Give them a 15s thinking buffer before offering encouragement.
+      if (userCommittedWordsThisQuestion < 6 && nudgeCountThisQuestion === 0) {
+        log.info(`Candidate paused after brief utterance (${userCommittedWordsThisQuestion} words) on Q${currentQuestionIndex + 1} — granting 15s thinking buffer`);
+        startSilenceGapTimer(15_000);
+        return;
+      }
+
+      log.info(`Silence gap (${ANSWER_DONE_SILENCE_MS}ms post-speech): considering user answer complete on Q${currentQuestionIndex + 1}`);
+      userSpokeThisTurn = false;
+      oaiWs.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [
+              {
                 type: "input_text",
                 text: isZh
-                  ? `[SYSTEM INSTRUCTION - IMMEDIATE PROCTORING DISRUPTION]: 检测到监考异常：“${alertType}”（${detail}）。请立即以温和、专业、自然的考官语气对候选人说出以下提醒，绝不要生硬严厉：\n“${spokenWarning}”\n${resumeNote}`
-                  : `[SYSTEM INSTRUCTION - IMMEDIATE PROCTORING DISRUPTION]: A proctoring violation occurred: "${alertType}" (${detail}). Immediately speak this warning to the candidate in a calm, polite, and professional tone:\n"${spokenWarning}"\n${resumeNote}`,
-              }],
-            },
-          }));
-          requestAssistantResponse("proctor violation disruption");
-        }
-      }
-
-      function normalizeAsrGuardText(text: string): string {
-        return text.toLowerCase().replace(/[^\w\u4e00-\u9fff]+/g, " ").replace(/\s+/g, " ").trim();
-      }
-
-      function shouldIgnoreStaleAsrText(text: string): boolean {
-        if (!staleAsrGuardText || Date.now() > staleAsrGuardUntil) return false;
-        const incoming = normalizeAsrGuardText(text);
-        const previous = normalizeAsrGuardText(staleAsrGuardText);
-        if (!incoming || !previous) return false;
-        if (incoming === previous) return true;
-        if (incoming.length >= 8 && previous.includes(incoming)) return true;
-        if (previous.length >= 8 && incoming.includes(previous)) return true;
-        return false;
-      }
-
-      function armStaleAsrGuard(text: string) {
-        staleAsrGuardText = text;
-        staleAsrGuardUntil = Date.now() + STALE_ASR_GUARD_MS;
-      }
-
-      function clearStaleAsrGuard() {
-        staleAsrGuardText = "";
-        staleAsrGuardUntil = 0;
-      }
-
-      function handleCommittedUserText(committedText: string, reason: string): boolean {
-        if (tryHandleExplicitUserNavigation(committedText)) {
-          return true;
-        }
-
-        if (isRepeatOrClarificationRequest(committedText)) {
-          log.info(`Candidate requested question repeat/clarification: "${committedText}"`);
-          if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
-            try {
-              oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            } catch {
-              // ignore
-            }
-            oaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "system",
-                content: [{
-                  type: "input_text",
-                  text: isZh
-                    ? `[SYSTEM] 候选人刚才请求重复刚才的问题（"${committedText}"）。请以温和清晰的口吻重新阐述或举例说明你刚才提出的问题或探讨点。切勿跳回开场白或第一题。`
-                    : `[SYSTEM] The candidate asked you to repeat or clarify what you just asked ("${committedText}"). Warmly and clearly repeat or rephrase the question or topic you just asked about in simple terms. Do NOT revert back to question 1 or previous introductory topics.`,
-                }],
+                  ? `[SYSTEM] 受访者已作答完毕并停顿。请以温和、富有参与感的态度简短回应并自然提出跟进问题，或在讨论充分后静默调用工具切换到下一题（严禁在发言中输出任何函数名或括号）。注意：绝不要替受访者讲解或给出标准答案；若受访者刚才是在询问准备发言，只需鼓励对方继续作答。`
+                  : `[SYSTEM] The participant has finished speaking and paused. Respond briefly (1-2 sentences) and probe deeper with a relevant follow-up, or transition to the next theme using silent tool calling. CRITICAL: Maintain your role as the interviewer. NEVER explain the concept, solve the question, or provide the answer yourself. NEVER speak or write tool names or bracket syntax like [signal_question_change(...)] in spoken words or text. If the candidate was asking for permission or expressing readiness to speak (e.g. "Can I rip it in?"), simply say "Go right ahead, the floor is yours!" and wait for their response.`,
               },
-            }));
-            requestAssistantResponse("candidate requested question repetition");
-          }
-          return true;
+            ],
+          },
+        })
+      );
+      requestAssistantResponse("silence gap - answer done");
+      return;
+    }
+
+    // 3. Candidate quiet thinking timeout (12s of silence with no speech):
+    // Never interrupt or nudge while candidate is actively typing code in the editor!
+    const isActivelyCoding = isCodingOrWhiteboard && (Date.now() - lastCodeEditedAt < 45_000);
+    if (!userSpokeThisTurn && !isActivelyCoding && currentQuestionIndex < sortedQuestions.length) {
+      nudgeCountThisQuestion++;
+      log.info(`Candidate quiet thinking timeout (12s, nudge #${nudgeCountThisQuestion}) on Q${currentQuestionIndex + 1} (firstQuestionAsked=${firstQuestionAsked}) — offering gentle check-in`);
+      let promptText = "";
+
+      if (!firstQuestionAsked) {
+        // Quiet during opening audio confirmation
+        if (nudgeCountThisQuestion === 1) {
+          promptText = isZh
+            ? `[SYSTEM] 您刚才询问了候选人能否听清声音（"能听到我说话吗？"），对方安静了12秒未回答。请温和礼貌地再次确认一下：“哈喽，请问能听到我的声音吗？如果可以的话请回答一下，我们马上开始面试。” 仅说这一句，不要重复长篇开场白。`
+            : `[SYSTEM] You asked the candidate if they can hear you loud and clear, and they have remained silent for 12 seconds. Gently check in: "Hey there! Just checking in to see if you can hear me loud and clear? Whenever you're ready, let me know so we can jump into our first topic." Say ONLY this single gentle sentence.`;
+        } else {
+          promptText = isZh
+            ? `[SYSTEM] 候选人长时间未回应语音确认。请提醒：“暂时没有收到您的声音，请检查一下麦克风是否已取消静音并正常连接。准备好随时告诉我！”`
+            : `[SYSTEM] The candidate has still not responded to your audio check. Warmly remind them: "I'm not picking up any audio from your microphone yet. Please check that your mic is unmuted and working, or say hello whenever you're ready!"`;
         }
+      } else {
+        // Quiet during technical question
+        if (nudgeCountThisQuestion === 1) {
+          promptText = isZh
+            ? `[SYSTEM] 受访者在听到题目后安静思考了12秒未作答。请以温和亲切的同行语气问候一句：'完全不用着急，放轻松！你可以花时间思考，如果有想法也可以直接边想边聊；需要我澄清题意吗？' 仅说这一句话，温和提示对方，绝不要给出答案或催促。`
+            : `[SYSTEM] The candidate has been quietly thinking for 12 seconds without answering. Prompt them warmly so the interview does not stay silent: 'Take your time! Feel free to think out loud, or let me know if you'd like me to clarify anything about the question.' Say ONLY this single sentence to check in. Do NOT give the answer or rush them.`;
+        } else if (nudgeCountThisQuestion === 2) {
+          promptText = isZh
+            ? `[SYSTEM] 受访者已继续安静思考了24秒。请温和提示：'您还在吗？完全不用着急，按你的节奏来。如果想先跳过这道题或者先聊聊别的思路，随时告诉我！'`
+            : `[SYSTEM] The candidate has continued thinking quietly for 24 seconds. Check in gently: 'Are you still with me? Take your time, or if you'd like to skip this question or explore a different angle, just let me know!'`;
+        } else if (nudgeCountThisQuestion === 3) {
+          promptText = isZh
+            ? `[SYSTEM] 受访者已长时间安静未说话（超过36秒）。请做简短语音确认：'检查一下您的语音连接是否正常，能听到我说话吗？如果准备好了随时告诉我，或者我们也可以先看下一道题。'`
+            : `[SYSTEM] The candidate has remained silent for over 36 seconds. Prompt them warmly to confirm they are still there and their audio is working: 'Just checking in to make sure you can still hear me and your audio is working. Whenever you're ready, let me know, or we can move forward to the next question.'`;
+        } else {
+          log.info(`Candidate quiet timeout: already nudged ${nudgeCountThisQuestion} times on Q${currentQuestionIndex + 1} — backing off for 60s to avoid repetition`);
+          startSilenceGapTimer(60_000);
+          return;
+        }
+      }
 
-        const currentQuestion = sortedQuestions[currentQuestionIndex];
-        if (
-          currentQuestion &&
-          (currentQuestion.type === "CODING" || currentQuestion.type === "WHITEBOARD") &&
-          isCodingDoneSignal(committedText) &&
-          oaiWs &&
-          oaiWs.readyState === WebSocket.OPEN
-        ) {
-          const codeSnippet = latestCode.trim()
-            ? `\n\nHere is the candidate's current code in the editor (${latestCodeLanguage}):\n\`\`\`${latestCodeLanguage}\n${latestCode.slice(0, 2000)}\n\`\`\`\nConduct a direct oral code review right now:\n- Name specific functions, variables, or methods they wrote (e.g. filter, modulo, etc.).\n- Acknowledge what their code accomplishes.\n- Probe them on edge cases, failure modes, and time/space complexity (e.g. O(n)).`
-            : `\nAcknowledge their completion and invite them to explain their logic, tradeoffs, and complexity.`;
-
-          oaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "system",
-              content: [{
+      oaiWs.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [
+              {
                 type: "input_text",
-                text: `[SYSTEM] The candidate completed their coding task.${codeSnippet}`,
-              }],
-            },
-          }));
-        } else if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
-          try {
-            oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-          } catch {
-            // ignore
-          }
-
-          nudgeCountThisQuestion = 0;
-          if (!firstQuestionAsked) {
-            firstQuestionAsked = true;
-            const firstQText = sortedQuestions[0]?.text || "";
-            oaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "system",
-                content: [{
-                  type: "input_text",
-                  text: isZh
-                    ? `[SYSTEM] 候选人已回应（"${committedText}"）。绝对不要重复问候，也不要再次询问能否听清！请热情确认对方声音清晰（如："太好了，声音非常清晰！"），并立即正式介绍${ctx.title}并提出第一道题目："${firstQText}"。切勿在提问前说"话筒交给你"或沉默等待。`
-                    : `[SYSTEM] The candidate has responded ("${committedText}"). CRITICAL: DO NOT repeat the opening greeting and DO NOT ask "can you hear me" again! Confirm enthusiastically that you can hear them (e.g., "Awesome, loud and clear!"), seamlessly introduce ${ctx.title}, and immediately ask Question 1: "${firstQText}". DO NOT say "the floor is yours" before asking the question!`,
-                }],
+                text: promptText,
               },
-            }));
-          }
+            ],
+          },
+        })
+      );
+      requestAssistantResponse("silence gap - gentle checkin");
+      return;
+    } else if (isActivelyCoding) {
+      startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
+      return;
+    }
+  }
 
-          oaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: committedText }],
-            },
-          }));
-        }
-        requestAssistantResponse(reason);
-        return false;
+  function tryAcceptFreshAsrText(text: string, label: string): boolean {
+    if (speechTranscriptCommitted) return false;
+    if (!inputTranscriptBuffer && !volcAsrAccumulator && shouldIgnoreStaleAsrText(text)) {
+      log.debug(`Ignored stale ${label}: ${JSON.stringify(text)}`);
+      return false;
+    }
+    clearStaleAsrGuard();
+    return true;
+  }
+
+  function emitInterimUserTranscript(text: string, allowWhenVolcSilent = false) {
+    if (allowWhenVolcSilent && volcAsrAccumulator.trim()) return;
+    if (!text || !text.trim()) {
+      send({ type: "asr", data: { results: [{ text: "" }] } });
+      return;
+    }
+    const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
+    if (isEchoWindow) {
+      const recentAssistant = [
+        outputTranscriptBuffer,
+        ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
+      ].filter(Boolean);
+      const echoCheck = stripAssistantEcho(text, recentAssistant);
+      if (echoCheck.isFullEcho) {
+        send({ type: "asr", data: { results: [{ text: "" }] } });
+        return;
       }
+      const cleaned = echoCheck.cleanedText || text;
+      send({ type: "asr", data: { results: [{ text: cleaned }] } });
+      return;
+    }
+    send({ type: "asr", data: { results: [{ text }] } });
+  }
 
-      function clearSpeechFinalizeTimer() {
-        if (pendingSpeechFinalize) {
-          clearTimeout(pendingSpeechFinalize);
-          pendingSpeechFinalize = null;
-        }
+  function handleVolcInterimText(text: string, label: string) {
+    if (!tryAcceptFreshAsrText(text, label)) return;
+    volcAsrAccumulator = mergeAsrText(volcAsrAccumulator, text);
+    noteTranscriptUpdate();
+    emitInterimUserTranscript(volcAsrAccumulator);
+  }
+
+  function handleVolcFinalText(reason: string, logLabel: string) {
+    const userText = bestAvailableTranscript();
+    if (userText && !volcAsrPreFlushed) {
+      if (USE_VOLC_ASR_PRIMARY) {
+        log.info(`${logLabel}: ${JSON.stringify(userText)}`);
+        finalizeUserTurn(reason);
+      } else {
+        log.debug(`${logLabel} (interim-only): ${JSON.stringify(userText)}`);
+        noteTranscriptUpdate();
+        emitInterimUserTranscript(userText);
       }
+    } else if (userText) {
+      log.debug(`${logLabel} (skipped${volcAsrPreFlushed ? ", pre-flushed" : ""}${speechTranscriptCommitted ? ", committed" : ""}): ${JSON.stringify(userText)}`);
+    }
+    volcAsrPreFlushed = false;
+  }
 
-      function bestAvailableTranscript(): string {
-        return mergeAsrText(inputTranscriptBuffer, volcAsrAccumulator).trim();
+  function handleWhisperDelta(delta: string) {
+    if (!delta) return;
+    if (!hasRealUserSpeech()) {
+      return;
+    }
+    if (!tryAcceptFreshAsrText(delta, "Whisper delta")) return;
+    inputTranscriptBuffer += delta;
+    if (isWhisperHallucination(inputTranscriptBuffer, ctx.language)) {
+      log.debug(`Interim hallucination suppressed: ${JSON.stringify(inputTranscriptBuffer)}`);
+      inputTranscriptBuffer = "";
+      return;
+    }
+    noteTranscriptUpdate();
+    if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
+    pendingAsrUpdate = setTimeout(() => {
+      pendingAsrUpdate = null;
+      emitInterimUserTranscript(inputTranscriptBuffer, true);
+    }, 150);
+    if (pendingInputFlush) scheduleInputFlush();
+  }
+
+  function handleWhisperCompletedTranscript(transcript: string) {
+    if (!transcript) return;
+
+    const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
+    if (isEchoWindow) {
+      const recentAssistant = [
+        outputTranscriptBuffer,
+        ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
+      ].filter(Boolean);
+
+      const echoCheck = stripAssistantEcho(transcript, recentAssistant);
+      if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+        log.info(`ASR dropped (echo of assistant): ${JSON.stringify(transcript)}`);
+        inputTranscriptBuffer = "";
+        return;
       }
+      transcript = echoCheck.cleanedText;
 
-      function noteTranscriptUpdate() {
-        lastTranscriptUpdateAt = Date.now();
-        const text = bestAvailableTranscript();
-        if (!vadSpeechActive && !speechTranscriptCommitted && text) {
-          if (isAnswerDoneSignal(text) || isCodingDoneSignal(text)) {
-            log.info(`Verbal completion signal detected in ASR update: "${text}" — scheduling immediate finalize`);
-            scheduleSpeechFinalize("verbal completion", 150);
-          }
-        }
+      if (isEchoOfAssistant(transcript)) {
+        log.debug(`ASR dropped (echo of assistant): ${JSON.stringify(transcript)}`);
+        inputTranscriptBuffer = "";
+        return;
       }
+    }
 
-      function transcriptLooksStable(now = Date.now()): boolean {
-        if (!lastTranscriptUpdateAt) return true;
-        const sinceUpdate = now - lastTranscriptUpdateAt;
-        const sinceSpeechStop = lastVadSpeechEnd ? now - lastVadSpeechEnd : Number.POSITIVE_INFINITY;
-        return sinceUpdate >= USER_TRANSCRIPT_STABILITY_MS || sinceSpeechStop >= USER_TRANSCRIPT_MAX_WAIT_MS;
+    if (!hasRealUserSpeech()) {
+      log.info(`ASR dropped (no genuine vocal energy: dur=${lastValidSpeechSegmentDuration}ms, peak=${lastValidSpeechSegmentPeakRms}): ${JSON.stringify(transcript)}`);
+      inputTranscriptBuffer = "";
+      return;
+    }
+
+    if (isWhisperHallucination(transcript, ctx.language)) {
+      log.info(`ASR dropped (hallucination): ${JSON.stringify(transcript)}`);
+      inputTranscriptBuffer = "";
+      return;
+    }
+
+    if (!tryAcceptFreshAsrText(transcript, "Whisper completion")) return;
+
+    log.info(`ASR completed: ${JSON.stringify(transcript)}`);
+    inputTranscriptBuffer = mergeAsrText(inputTranscriptBuffer, transcript);
+    noteTranscriptUpdate();
+    if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
+    pendingAsrUpdate = null;
+    emitInterimUserTranscript(inputTranscriptBuffer, true);
+
+    // If user has stopped speaking, check for verbal completion or natural thinking silence
+    if (!vadSpeechActive && !speechTranscriptCommitted) {
+      const isDone = isAnswerDoneSignal(transcript) || isCodingDoneSignal(transcript) || isAnswerDoneSignal(inputTranscriptBuffer);
+      const isBrief = isAudioConfirmationOrGreeting(inputTranscriptBuffer || transcript);
+      if (isDone) {
+        log.info(`Verbal completion detected in Whisper completion: "${transcript}" — finalizing immediately`);
+        scheduleSpeechFinalize("ASR completion - verbal completion", 150);
+      } else if (isBrief) {
+        log.info(`Brief greeting/audio check detected in Whisper completion: "${transcript}" — finalizing promptly (1800ms)`);
+        scheduleSpeechFinalize("ASR completion - brief greeting", 1800);
+      } else {
+        const msSinceStop = lastVadSpeechEnd ? Date.now() - lastVadSpeechEnd : 0;
+        const isIncomplete = hasTrailingIncompleteThought(inputTranscriptBuffer || transcript);
+        const neededSilence = isIncomplete ? 10_000 : ANSWER_DONE_SILENCE_MS;
+        const finalizeDelay = Math.max(2000, neededSilence - msSinceStop);
+        log.debug(`ASR completion without done signal — waiting for natural silence gap (${finalizeDelay}ms remaining)`);
+        scheduleSpeechFinalize("ASR completion - natural silence", finalizeDelay);
       }
+    } else {
+      scheduleInputFlush();
+    }
+  }
 
-      let lastCommittedUserTranscript = "";
-      let lastCommittedUserTranscriptAt = 0;
+  let vadStuckWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
-      function commitUserTranscript(reason: string): string {
-        clearSpeechFinalizeTimer();
-        if (speechTranscriptCommitted) return "";
+  function clearVadWatchdogTimer() {
+    if (vadStuckWatchdogTimer) {
+      clearTimeout(vadStuckWatchdogTimer);
+      vadStuckWatchdogTimer = null;
+    }
+  }
 
-        let committedText = bestAvailableTranscript();
-        if (!committedText) return "";
+  function handleSpeechStartedEvent() {
+    log.debug("VAD: user speech started");
+    speechStopForwardGraceUntil = 0;
 
-        const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
-        if (isEchoWindow) {
-          const recentAssistant = [
-            outputTranscriptBuffer,
-            ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
-          ].filter(Boolean);
+    // If the assistant is actively speaking or generating a response, NEVER allow raw
+    // server VAD to blindly cancel or interrupt the assistant!
+    // Microphone ambient noise, mic turn-on pops, or laptop speaker acoustic bleed
+    // will trigger server VAD false-positives and instantly kill the AI's greeting/speech.
+    // True candidate barge-in is handled rigorously by shouldAllowTtsBargeIn in the PCM loop.
+    if (modelIsSpeaking || responseAudioStarted || responseInFlight) {
+      log.debug("VAD: user speech started ignored during active assistant response (deferring to PCM barge-in)");
+      return;
+    }
 
-          const echoCheck = stripAssistantEcho(committedText, recentAssistant);
-          if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
-            log.info(`commitUserTranscript dropped (full echo): ${JSON.stringify(committedText)}`);
-            inputTranscriptBuffer = "";
-            volcAsrAccumulator = "";
-            return "";
-          }
-          committedText = echoCheck.cleanedText;
-        }
+    clearSilenceGapTimer();
+    if (pendingInputFlush) {
+      clearTimeout(pendingInputFlush);
+      pendingInputFlush = null;
+    }
 
-        if (isWhisperHallucination(committedText, ctx.language)) {
-          log.info(`Dropped hallucination in commitUserTranscript (${reason}): ${JSON.stringify(committedText)}`);
-          inputTranscriptBuffer = "";
-          volcAsrAccumulator = "";
-          return "";
-        }
+    queuedAssistantResponse = null;
+    cancelOngoingResponse();
+    clearSpeechFinalizeTimer();
+    vadSpeechActive = true;
+    trailingConjunctionBuffered = false;
+    lastTranscriptUpdateAt = 0;
+    if (speechTranscriptCommitted) {
+      speechTranscriptCommitted = false;
+      volcAsrAccumulator = "";
+      inputTranscriptBuffer = "";
+    }
+    send({ type: "interrupt" });
 
-        if (!hasRealUserSpeech()) {
-          log.info(`Dropped committed transcript on silence / no vocal energy (${reason}): ${JSON.stringify(committedText)}`);
-          inputTranscriptBuffer = "";
-          volcAsrAccumulator = "";
-          return "";
-        }
+    // Safety watchdog: if OpenAI VAD never fires speech_stopped (ambient noise / room tone),
+    // auto-recover after 6s of no genuine speech energy
+    clearVadWatchdogTimer();
+    vadStuckWatchdogTimer = setTimeout(() => {
+      vadStuckWatchdogTimer = null;
+      if (
+        vadSpeechActive &&
+        !hasRealUserSpeech() &&
+        (Date.now() - lastTranscriptUpdateAt > 3500 || lastTranscriptUpdateAt === 0)
+      ) {
+        log.warn("VAD watchdog: user speech started active for 6s without genuine speech energy — resetting vadSpeechActive");
+        vadSpeechActive = false;
+        startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
+      }
+    }, 6000);
 
-        userSpokeThisTurn = true;
-        nudgeCountThisQuestion = 0;
-        speechTranscriptCommitted = true;
-        lastCommittedUserTranscript = committedText;
-        lastCommittedUserTranscriptAt = Date.now();
-        pushHistory("user", committedText);
-        send({ type: "asr_ended", text: committedText });
-        log.info(`Committed user transcript (${reason}): ${JSON.stringify(committedText)}`);
+    // Safety fallback timer: ensure silence check runs even if speech_stopped event is dropped
+    silenceGapTimer = setTimeout(() => {
+      silenceGapTimer = null;
+      if (vadSpeechActive && !hasRealUserSpeech()) {
+        log.warn("Safety watchdog: speech_stopped never received — forcing silence check");
+        vadSpeechActive = false;
+      }
+      handleSilenceGapTimeout();
+    }, 15_000);
+  }
+
+  function handleSpeechStoppedEvent() {
+    clearVadWatchdogTimer();
+    vadSpeechActive = false;
+    lastVadSpeechEnd = Date.now();
+    speechStopForwardGraceUntil = lastVadSpeechEnd + SPEECH_STOP_FORWARD_GRACE_MS;
+    log.debug("VAD: user speech stopped");
+    if (modelIsSpeaking || responseAudioStarted || responseInFlight) {
+      return;
+    }
+    send({ type: "processing_start" });
+
+    const pendingText = bestAvailableTranscript() || inputTranscriptBuffer || volcAsrAccumulator || "";
+    const isDone = isAnswerDoneSignal(pendingText) || isCodingDoneSignal(pendingText);
+    const isIncomplete = hasTrailingIncompleteThought(pendingText);
+    const isBrief = isAudioConfirmationOrGreeting(pendingText);
+
+    if (!speechTranscriptCommitted && pendingText) {
+      if (isDone) {
+        log.info(`Verbal completion detected at speech stop ("${pendingText}") — scheduling immediate finalize`);
+        scheduleSpeechFinalize("speech stop (verbal completion)", 150);
+      } else if (isBrief) {
+        log.info(`Brief greeting/audio check detected at speech stop ("${pendingText}") — scheduling prompt finalize (1800ms)`);
+        scheduleSpeechFinalize("speech stop (brief greeting)", 1800);
+      } else {
+        const delay = isIncomplete ? 10_000 : ANSWER_DONE_SILENCE_MS;
+        scheduleSpeechFinalize("speech stop (natural silence)", delay);
+      }
+    }
+
+    const silenceDelay = isDone ? 150 : (isBrief ? 1800 : (isIncomplete ? 10_000 : ANSWER_DONE_SILENCE_MS));
+    startSilenceGapTimer(silenceDelay);
+  }
+
+  function flushPendingUserTurnBeforeAssistant() {
+    if (!speechTranscriptCommitted && bestAvailableTranscript()) {
+      const pendingUserText = bestAvailableTranscript();
+      if (isWhisperHallucination(pendingUserText, ctx.language) || isEchoOfAssistant(pendingUserText)) {
+        log.info(`Dropped hallucination/echo before assistant: ${JSON.stringify(pendingUserText)}`);
         inputTranscriptBuffer = "";
         volcAsrAccumulator = "";
-        lastTranscriptUpdateAt = 0;
-        armStaleAsrGuard(committedText);
-        // Reset valid speech segment so trailing silence cannot piggyback on this speech
-        lastValidSpeechSegmentDuration = 0;
-        lastValidSpeechSegmentPeakRms = 0;
-        lastValidSpeechSegmentEndedAt = 0;
-        return committedText;
+        return;
       }
+      volcAsrPreFlushed = true;
+      log.info(`ASR pre-flush: ${JSON.stringify(pendingUserText)}`);
+      finalizeUserTurn("response pre-flush", false);
+      return;
+    }
 
-      function scheduleSpeechFinalize(reason: string, delayMs = 15_000) {
-        clearSpeechFinalizeTimer();
-        pendingSpeechFinalize = setTimeout(() => {
-          pendingSpeechFinalize = null;
-          if (speechTranscriptCommitted || !bestAvailableTranscript()) return;
-          if (!transcriptLooksStable()) {
-            const now = Date.now();
-            const waitForStability = Math.max(
-              150,
-              USER_TRANSCRIPT_STABILITY_MS - (now - lastTranscriptUpdateAt),
-            );
-            const waitForCap = lastVadSpeechEnd
-              ? Math.max(150, USER_TRANSCRIPT_MAX_WAIT_MS - (now - lastVadSpeechEnd))
-              : USER_TRANSCRIPT_STABILITY_MS;
-            scheduleSpeechFinalize(reason, Math.min(waitForStability, waitForCap));
-            return;
-          }
-          finalizeUserTurn(reason);
-        }, delayMs);
-      }
+    if (volcAsrAccumulator.trim()) {
+      log.debug(`Volc ASR pre-flush skipped (already committed): ${JSON.stringify(volcAsrAccumulator.trim())}`);
+      volcAsrAccumulator = "";
+      volcAsrPreFlushed = true;
+    }
+  }
 
-      function finalizeUserTurn(reason: string, requestResponse = true): string {
-        const committed = commitUserTranscript(reason);
-        if (committed && requestResponse) {
-          handleCommittedUserText(committed, reason);
-        }
-        return committed;
-      }
+  function buildRealtimeAudioInputConfig() {
+    const lang = (ctx.language || "en").slice(0, 2).toLowerCase();
+    return {
+      format: { type: "audio/pcm", rate: 24000 as const },
+      transcription: {
+        model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+        language: lang === "zh" ? "zh" : "en",
+        prompt: lang === "zh"
+          ? "技术面试交流：软件工程、架构设计、算法、代码实现与系统分析。"
+          : "Technical interview discussion covering software engineering, React, JavaScript, TypeScript, frontend, backend, APIs, system design, data structures, algorithms.",
+      },
+      turn_detection: {
+        type: "server_vad" as const,
+        threshold: 0.80,
+        prefix_padding_ms: 200,
+        silence_duration_ms: 800,
+        create_response: false,
+      },
+    };
+  }
 
-      function clearSilenceGapTimer() {
-        if (silenceGapTimer) {
-          clearTimeout(silenceGapTimer);
-          silenceGapTimer = null;
-        }
-      }
+  function setOpenAiTranscriptionEnabled(enabled: boolean, reason: string) {
+    // Keep OpenAI transcription active unless Volcengine is explicitly
+    // the primary ASR and healthy.
+    if (!enabled) {
+      log.info(`OpenAI transcription kept warm (${reason})`);
+      return;
+    }
+    if (openAiTranscriptionEnabled === enabled) return;
+    openAiTranscriptionEnabled = enabled;
+    log.info(`OpenAI transcription ${enabled ? "enabled" : "disabled"} (${reason})`);
 
-      function startSilenceGapTimer(delayMs = INITIAL_THINKING_SILENCE_MS) {
-        clearSilenceGapTimer();
-        if (browserClosed || interviewDone || isTransitioning || modelIsSpeaking || responseInFlight) {
-          return;
-        }
-        silenceGapTimer = setTimeout(() => {
-          silenceGapTimer = null;
-          handleSilenceGapTimeout();
-        }, delayMs);
-      }
-
-      function handleSilenceGapTimeout() {
-        if (browserClosed || interviewDone || isTransitioning) {
-          return;
-        }
-        const now = Date.now();
-        // Watchdog: reset stuck vadSpeechActive if there has been no vocal energy or new transcript for >3.5s
-        if (
-          vadSpeechActive &&
-          !hasRealUserSpeech(now) &&
-          (now - lastTranscriptUpdateAt > 3500 || lastTranscriptUpdateAt === 0)
-        ) {
-          log.warn("handleSilenceGapTimeout: VAD flagged active without genuine speech energy or transcripts — resetting vadSpeechActive");
-          vadSpeechActive = false;
-        }
-        if (now < ttsPlaybackEndsAt) {
-          const waitMs = Math.max(2000, ttsPlaybackEndsAt - now + 2000);
-          log.info(`handleSilenceGapTimeout: audio still playing in browser (${waitMs}ms remaining) — deferring silence check`);
-          startSilenceGapTimer(waitMs);
-          return;
-        }
-        if (modelIsSpeaking || responseAudioStarted || responseInFlight || vadSpeechActive) {
-          // Assistant is speaking or audio is in flight — re-poll silence in 2s so the timer never dies
-          startSilenceGapTimer(2000);
-          return;
-        }
-        if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
-
-        // 1. If there is uncommitted speech in the buffer, flush and commit it
-        if (!speechTranscriptCommitted && bestAvailableTranscript()) {
-          log.info("Silence gap: flushing pending user transcript");
-          const committed = finalizeUserTurn("silence gap - flush");
-          if (committed) return;
-        }
-
-        const currentQuestion = sortedQuestions[currentQuestionIndex];
-        const isCodingOrWhiteboard =
-          currentQuestion &&
-          (currentQuestion.type === "CODING" || currentQuestion.type === "WHITEBOARD");
-
-        // 2. If user already spoke during this turn:
-        // Consider the answer is DONE after silence gap (natural turnaround with thinking space)!
-        if (userSpokeThisTurn) {
-          const pendingCheck = bestAvailableTranscript() || inputTranscriptBuffer || volcAsrAccumulator || "";
-          if (hasTrailingIncompleteThought(pendingCheck) && !trailingConjunctionBuffered) {
-            trailingConjunctionBuffered = true;
-            log.info(`Trailing conjunction detected in "${pendingCheck.slice(-30)}" at silence gap — adding 3500ms extra thinking buffer`);
-            startSilenceGapTimer(3500);
-            return;
-          }
-          trailingConjunctionBuffered = false;
-
-          // If the candidate only gave a brief acknowledgment or filler (< 6 words, e.g. "Let me think"),
-          // do NOT interrupt immediately. Give them a 15s thinking buffer before offering encouragement.
-          if (userCommittedWordsThisQuestion < 6 && nudgeCountThisQuestion === 0) {
-            log.info(`Candidate paused after brief utterance (${userCommittedWordsThisQuestion} words) on Q${currentQuestionIndex + 1} — granting 15s thinking buffer`);
-            startSilenceGapTimer(15_000);
-            return;
-          }
-
-          log.info(`Silence gap (${ANSWER_DONE_SILENCE_MS}ms post-speech): considering user answer complete on Q${currentQuestionIndex + 1}`);
-          userSpokeThisTurn = false;
-          oaiWs.send(
-            JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "system",
-                content: [
-                  {
-                    type: "input_text",
-                    text: isZh
-                      ? `[SYSTEM] 受访者已作答完毕并停顿。请以温和、富有参与感的态度简短回应并自然提出跟进问题，或在讨论充分后静默调用工具切换到下一题（严禁在发言中输出任何函数名或括号）。注意：绝不要替受访者讲解或给出标准答案；若受访者刚才是在询问准备发言，只需鼓励对方继续作答。`
-                      : `[SYSTEM] The participant has finished speaking and paused. Respond briefly (1-2 sentences) and probe deeper with a relevant follow-up, or transition to the next theme using silent tool calling. CRITICAL: Maintain your role as the interviewer. NEVER explain the concept, solve the question, or provide the answer yourself. NEVER speak or write tool names or bracket syntax like [signal_question_change(...)] in spoken words or text. If the candidate was asking for permission or expressing readiness to speak (e.g. "Can I rip it in?"), simply say "Go right ahead, the floor is yours!" and wait for their response.`,
-                  },
-                ],
+    if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+    oaiWs.send(JSON.stringify({
+      type: "session.update",
+      session: {
+        type: "realtime",
+        audio: {
+          input: enabled
+            ? buildRealtimeAudioInputConfig()
+            : {
+              format: { type: "audio/pcm", rate: 24000 },
+              turn_detection: {
+                type: "semantic_vad",
+                eagerness: "low",
+                create_response: false,
+                interrupt_response: true,
               },
-            })
-          );
-          requestAssistantResponse("silence gap - answer done");
-          return;
-        }
-
-        // 3. Candidate quiet thinking timeout (12s of silence with no speech):
-        // Never interrupt or nudge while candidate is actively typing code in the editor!
-        const isActivelyCoding = isCodingOrWhiteboard && (Date.now() - lastCodeEditedAt < 45_000);
-        if (!userSpokeThisTurn && !isActivelyCoding && currentQuestionIndex < sortedQuestions.length) {
-          nudgeCountThisQuestion++;
-          log.info(`Candidate quiet thinking timeout (12s, nudge #${nudgeCountThisQuestion}) on Q${currentQuestionIndex + 1} (firstQuestionAsked=${firstQuestionAsked}) — offering gentle check-in`);
-          let promptText = "";
-
-          if (!firstQuestionAsked) {
-            // Quiet during opening audio confirmation
-            if (nudgeCountThisQuestion === 1) {
-              promptText = isZh
-                ? `[SYSTEM] 您刚才询问了候选人能否听清声音（"能听到我说话吗？"），对方安静了12秒未回答。请温和礼貌地再次确认一下：“哈喽，请问能听到我的声音吗？如果可以的话请回答一下，我们马上开始面试。” 仅说这一句，不要重复长篇开场白。`
-                : `[SYSTEM] You asked the candidate if they can hear you loud and clear, and they have remained silent for 12 seconds. Gently check in: "Hey there! Just checking in to see if you can hear me loud and clear? Whenever you're ready, let me know so we can jump into our first topic." Say ONLY this single gentle sentence.`;
-            } else {
-              promptText = isZh
-                ? `[SYSTEM] 候选人长时间未回应语音确认。请提醒：“暂时没有收到您的声音，请检查一下麦克风是否已取消静音并正常连接。准备好随时告诉我！”`
-                : `[SYSTEM] The candidate has still not responded to your audio check. Warmly remind them: "I'm not picking up any audio from your microphone yet. Please check that your mic is unmuted and working, or say hello whenever you're ready!"`;
-            }
-          } else {
-            // Quiet during technical question
-            if (nudgeCountThisQuestion === 1) {
-              promptText = isZh
-                ? `[SYSTEM] 受访者在听到题目后安静思考了12秒未作答。请以温和亲切的同行语气问候一句：'完全不用着急，放轻松！你可以花时间思考，如果有想法也可以直接边想边聊；需要我澄清题意吗？' 仅说这一句话，温和提示对方，绝不要给出答案或催促。`
-                : `[SYSTEM] The candidate has been quietly thinking for 12 seconds without answering. Prompt them warmly so the interview does not stay silent: 'Take your time! Feel free to think out loud, or let me know if you'd like me to clarify anything about the question.' Say ONLY this single sentence to check in. Do NOT give the answer or rush them.`;
-            } else if (nudgeCountThisQuestion === 2) {
-              promptText = isZh
-                ? `[SYSTEM] 受访者已继续安静思考了24秒。请温和提示：'您还在吗？完全不用着急，按你的节奏来。如果想先跳过这道题或者先聊聊别的思路，随时告诉我！'`
-                : `[SYSTEM] The candidate has continued thinking quietly for 24 seconds. Check in gently: 'Are you still with me? Take your time, or if you'd like to skip this question or explore a different angle, just let me know!'`;
-            } else if (nudgeCountThisQuestion === 3) {
-              promptText = isZh
-                ? `[SYSTEM] 受访者已长时间安静未说话（超过36秒）。请做简短语音确认：'检查一下您的语音连接是否正常，能听到我说话吗？如果准备好了随时告诉我，或者我们也可以先看下一道题。'`
-                : `[SYSTEM] The candidate has remained silent for over 36 seconds. Prompt them warmly to confirm they are still there and their audio is working: 'Just checking in to make sure you can still hear me and your audio is working. Whenever you're ready, let me know, or we can move forward to the next question.'`;
-            } else {
-              log.info(`Candidate quiet timeout: already nudged ${nudgeCountThisQuestion} times on Q${currentQuestionIndex + 1} — backing off for 60s to avoid repetition`);
-              startSilenceGapTimer(60_000);
-              return;
-            }
-          }
-
-          oaiWs.send(
-            JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "system",
-                content: [
-                  {
-                    type: "input_text",
-                    text: promptText,
-                  },
-                ],
-              },
-            })
-          );
-          requestAssistantResponse("silence gap - gentle checkin");
-          return;
-        } else if (isActivelyCoding) {
-          startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
-          return;
-        }
-      }
-
-      function tryAcceptFreshAsrText(text: string, label: string): boolean {
-        if (speechTranscriptCommitted) return false;
-        if (!inputTranscriptBuffer && !volcAsrAccumulator && shouldIgnoreStaleAsrText(text)) {
-          log.debug(`Ignored stale ${label}: ${JSON.stringify(text)}`);
-          return false;
-        }
-        clearStaleAsrGuard();
-        return true;
-      }
-
-      function emitInterimUserTranscript(text: string, allowWhenVolcSilent = false) {
-        if (allowWhenVolcSilent && volcAsrAccumulator.trim()) return;
-        if (!text || !text.trim()) {
-          send({ type: "asr", data: { results: [{ text: "" }] } });
-          return;
-        }
-        const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
-        if (isEchoWindow) {
-          const recentAssistant = [
-            outputTranscriptBuffer,
-            ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
-          ].filter(Boolean);
-          const echoCheck = stripAssistantEcho(text, recentAssistant);
-          if (echoCheck.isFullEcho) {
-            send({ type: "asr", data: { results: [{ text: "" }] } });
-            return;
-          }
-          const cleaned = echoCheck.cleanedText || text;
-          send({ type: "asr", data: { results: [{ text: cleaned }] } });
-          return;
-        }
-        send({ type: "asr", data: { results: [{ text }] } });
-      }
-
-      function handleVolcInterimText(text: string, label: string) {
-        if (!tryAcceptFreshAsrText(text, label)) return;
-        volcAsrAccumulator = mergeAsrText(volcAsrAccumulator, text);
-        noteTranscriptUpdate();
-        emitInterimUserTranscript(volcAsrAccumulator);
-      }
-
-      function handleVolcFinalText(reason: string, logLabel: string) {
-        const userText = bestAvailableTranscript();
-        if (userText && !volcAsrPreFlushed) {
-          if (USE_VOLC_ASR_PRIMARY) {
-            log.info(`${logLabel}: ${JSON.stringify(userText)}`);
-            finalizeUserTurn(reason);
-          } else {
-            log.debug(`${logLabel} (interim-only): ${JSON.stringify(userText)}`);
-            noteTranscriptUpdate();
-            emitInterimUserTranscript(userText);
-          }
-        } else if (userText) {
-          log.debug(`${logLabel} (skipped${volcAsrPreFlushed ? ", pre-flushed" : ""}${speechTranscriptCommitted ? ", committed" : ""}): ${JSON.stringify(userText)}`);
-        }
-        volcAsrPreFlushed = false;
-      }
-
-      function handleWhisperDelta(delta: string) {
-        if (!delta) return;
-        if (!hasRealUserSpeech()) {
-          return;
-        }
-        if (!tryAcceptFreshAsrText(delta, "Whisper delta")) return;
-        inputTranscriptBuffer += delta;
-        if (isWhisperHallucination(inputTranscriptBuffer, ctx.language)) {
-          log.debug(`Interim hallucination suppressed: ${JSON.stringify(inputTranscriptBuffer)}`);
-          inputTranscriptBuffer = "";
-          return;
-        }
-        noteTranscriptUpdate();
-        if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
-        pendingAsrUpdate = setTimeout(() => {
-          pendingAsrUpdate = null;
-          emitInterimUserTranscript(inputTranscriptBuffer, true);
-        }, 150);
-        if (pendingInputFlush) scheduleInputFlush();
-      }
-
-      function handleWhisperCompletedTranscript(transcript: string) {
-        if (!transcript) return;
-
-        const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
-        if (isEchoWindow) {
-          const recentAssistant = [
-            outputTranscriptBuffer,
-            ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
-          ].filter(Boolean);
-
-          const echoCheck = stripAssistantEcho(transcript, recentAssistant);
-          if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
-            log.info(`ASR dropped (echo of assistant): ${JSON.stringify(transcript)}`);
-            inputTranscriptBuffer = "";
-            return;
-          }
-          transcript = echoCheck.cleanedText;
-
-          if (isEchoOfAssistant(transcript)) {
-            log.debug(`ASR dropped (echo of assistant): ${JSON.stringify(transcript)}`);
-            inputTranscriptBuffer = "";
-            return;
-          }
-        }
-
-        if (!hasRealUserSpeech()) {
-          log.info(`ASR dropped (no genuine vocal energy: dur=${lastValidSpeechSegmentDuration}ms, peak=${lastValidSpeechSegmentPeakRms}): ${JSON.stringify(transcript)}`);
-          inputTranscriptBuffer = "";
-          return;
-        }
-
-        if (isWhisperHallucination(transcript, ctx.language)) {
-          log.info(`ASR dropped (hallucination): ${JSON.stringify(transcript)}`);
-          inputTranscriptBuffer = "";
-          return;
-        }
-
-        if (!tryAcceptFreshAsrText(transcript, "Whisper completion")) return;
-
-        log.info(`ASR completed: ${JSON.stringify(transcript)}`);
-        inputTranscriptBuffer = mergeAsrText(inputTranscriptBuffer, transcript);
-        noteTranscriptUpdate();
-        if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
-        pendingAsrUpdate = null;
-        emitInterimUserTranscript(inputTranscriptBuffer, true);
-
-        // If user has stopped speaking, check for verbal completion or natural thinking silence
-        if (!vadSpeechActive && !speechTranscriptCommitted) {
-          const isDone = isAnswerDoneSignal(transcript) || isCodingDoneSignal(transcript) || isAnswerDoneSignal(inputTranscriptBuffer);
-          const isBrief = isAudioConfirmationOrGreeting(inputTranscriptBuffer || transcript);
-          if (isDone) {
-            log.info(`Verbal completion detected in Whisper completion: "${transcript}" — finalizing immediately`);
-            scheduleSpeechFinalize("ASR completion - verbal completion", 150);
-          } else if (isBrief) {
-            log.info(`Brief greeting/audio check detected in Whisper completion: "${transcript}" — finalizing promptly (1800ms)`);
-            scheduleSpeechFinalize("ASR completion - brief greeting", 1800);
-          } else {
-            const msSinceStop = lastVadSpeechEnd ? Date.now() - lastVadSpeechEnd : 0;
-            const isIncomplete = hasTrailingIncompleteThought(inputTranscriptBuffer || transcript);
-            const neededSilence = isIncomplete ? 10_000 : ANSWER_DONE_SILENCE_MS;
-            const finalizeDelay = Math.max(2000, neededSilence - msSinceStop);
-            log.debug(`ASR completion without done signal — waiting for natural silence gap (${finalizeDelay}ms remaining)`);
-            scheduleSpeechFinalize("ASR completion - natural silence", finalizeDelay);
-          }
-        } else {
-          scheduleInputFlush();
-        }
-      }
-
-      let vadStuckWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
-
-      function clearVadWatchdogTimer() {
-        if (vadStuckWatchdogTimer) {
-          clearTimeout(vadStuckWatchdogTimer);
-          vadStuckWatchdogTimer = null;
-        }
-      }
-
-      function handleSpeechStartedEvent() {
-        log.debug("VAD: user speech started");
-        speechStopForwardGraceUntil = 0;
-
-        // If the assistant is actively speaking or generating a response, NEVER allow raw
-        // server VAD to blindly cancel or interrupt the assistant!
-        // Microphone ambient noise, mic turn-on pops, or laptop speaker acoustic bleed
-        // will trigger server VAD false-positives and instantly kill the AI's greeting/speech.
-        // True candidate barge-in is handled rigorously by shouldAllowTtsBargeIn in the PCM loop.
-        if (modelIsSpeaking || responseAudioStarted || responseInFlight) {
-          log.debug("VAD: user speech started ignored during active assistant response (deferring to PCM barge-in)");
-          return;
-        }
-
-        clearSilenceGapTimer();
-        if (pendingInputFlush) {
-          clearTimeout(pendingInputFlush);
-          pendingInputFlush = null;
-        }
-
-        queuedAssistantResponse = null;
-        cancelOngoingResponse();
-        clearSpeechFinalizeTimer();
-        vadSpeechActive = true;
-        trailingConjunctionBuffered = false;
-        lastTranscriptUpdateAt = 0;
-        if (speechTranscriptCommitted) {
-          speechTranscriptCommitted = false;
-          volcAsrAccumulator = "";
-          inputTranscriptBuffer = "";
-        }
-        send({ type: "interrupt" });
-
-        // Safety watchdog: if OpenAI VAD never fires speech_stopped (ambient noise / room tone),
-        // auto-recover after 6s of no genuine speech energy
-        clearVadWatchdogTimer();
-        vadStuckWatchdogTimer = setTimeout(() => {
-          vadStuckWatchdogTimer = null;
-          if (
-            vadSpeechActive &&
-            !hasRealUserSpeech() &&
-            (Date.now() - lastTranscriptUpdateAt > 3500 || lastTranscriptUpdateAt === 0)
-          ) {
-            log.warn("VAD watchdog: user speech started active for 6s without genuine speech energy — resetting vadSpeechActive");
-            vadSpeechActive = false;
-            startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
-          }
-        }, 6000);
-
-        // Safety fallback timer: ensure silence check runs even if speech_stopped event is dropped
-        silenceGapTimer = setTimeout(() => {
-          silenceGapTimer = null;
-          if (vadSpeechActive && !hasRealUserSpeech()) {
-            log.warn("Safety watchdog: speech_stopped never received — forcing silence check");
-            vadSpeechActive = false;
-          }
-          handleSilenceGapTimeout();
-        }, 15_000);
-      }
-
-      function handleSpeechStoppedEvent() {
-        clearVadWatchdogTimer();
-        vadSpeechActive = false;
-        lastVadSpeechEnd = Date.now();
-        speechStopForwardGraceUntil = lastVadSpeechEnd + SPEECH_STOP_FORWARD_GRACE_MS;
-        log.debug("VAD: user speech stopped");
-        if (modelIsSpeaking || responseAudioStarted || responseInFlight) {
-          return;
-        }
-        send({ type: "processing_start" });
-
-        const pendingText = bestAvailableTranscript() || inputTranscriptBuffer || volcAsrAccumulator || "";
-        const isDone = isAnswerDoneSignal(pendingText) || isCodingDoneSignal(pendingText);
-        const isIncomplete = hasTrailingIncompleteThought(pendingText);
-        const isBrief = isAudioConfirmationOrGreeting(pendingText);
-
-        if (!speechTranscriptCommitted && pendingText) {
-          if (isDone) {
-            log.info(`Verbal completion detected at speech stop ("${pendingText}") — scheduling immediate finalize`);
-            scheduleSpeechFinalize("speech stop (verbal completion)", 150);
-          } else if (isBrief) {
-            log.info(`Brief greeting/audio check detected at speech stop ("${pendingText}") — scheduling prompt finalize (1800ms)`);
-            scheduleSpeechFinalize("speech stop (brief greeting)", 1800);
-          } else {
-            const delay = isIncomplete ? 10_000 : ANSWER_DONE_SILENCE_MS;
-            scheduleSpeechFinalize("speech stop (natural silence)", delay);
-          }
-        }
-
-        const silenceDelay = isDone ? 150 : (isBrief ? 1800 : (isIncomplete ? 10_000 : ANSWER_DONE_SILENCE_MS));
-        startSilenceGapTimer(silenceDelay);
-      }
-
-      function flushPendingUserTurnBeforeAssistant() {
-        if (!speechTranscriptCommitted && bestAvailableTranscript()) {
-          const pendingUserText = bestAvailableTranscript();
-          if (isWhisperHallucination(pendingUserText, ctx.language) || isEchoOfAssistant(pendingUserText)) {
-            log.info(`Dropped hallucination/echo before assistant: ${JSON.stringify(pendingUserText)}`);
-            inputTranscriptBuffer = "";
-            volcAsrAccumulator = "";
-            return;
-          }
-          volcAsrPreFlushed = true;
-          log.info(`ASR pre-flush: ${JSON.stringify(pendingUserText)}`);
-          finalizeUserTurn("response pre-flush", false);
-          return;
-        }
-
-        if (volcAsrAccumulator.trim()) {
-          log.debug(`Volc ASR pre-flush skipped (already committed): ${JSON.stringify(volcAsrAccumulator.trim())}`);
-          volcAsrAccumulator = "";
-          volcAsrPreFlushed = true;
-        }
-      }
-
-      function buildRealtimeAudioInputConfig() {
-        const lang = (ctx.language || "en").slice(0, 2).toLowerCase();
-        return {
-          format: { type: "audio/pcm", rate: 24000 as const },
-          transcription: {
-            model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
-            language: lang === "zh" ? "zh" : "en",
-            prompt: lang === "zh"
-              ? "技术面试交流：软件工程、架构设计、算法、代码实现与系统分析。"
-              : "Technical interview discussion covering software engineering, React, JavaScript, TypeScript, frontend, backend, APIs, system design, data structures, algorithms.",
-          },
-          turn_detection: {
-            type: "server_vad" as const,
-            threshold: 0.80,
-            prefix_padding_ms: 200,
-            silence_duration_ms: 800,
-            create_response: false,
-          },
-        };
-      }
-
-      function setOpenAiTranscriptionEnabled(enabled: boolean, reason: string) {
-        // Keep OpenAI transcription active unless Volcengine is explicitly
-        // the primary ASR and healthy.
-        if (!enabled) {
-          log.info(`OpenAI transcription kept warm (${reason})`);
-          return;
-        }
-        if (openAiTranscriptionEnabled === enabled) return;
-        openAiTranscriptionEnabled = enabled;
-        log.info(`OpenAI transcription ${enabled ? "enabled" : "disabled"} (${reason})`);
-
-        if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
-        oaiWs.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            type: "realtime",
-            audio: {
-              input: enabled
-                ? buildRealtimeAudioInputConfig()
-                : {
-                  format: { type: "audio/pcm", rate: 24000 },
-                  turn_detection: {
-                    type: "semantic_vad",
-                    eagerness: "low",
-                    create_response: false,
-                    interrupt_response: true,
-                  },
-                },
             },
-          },
-        }));
+        },
+      },
+    }));
+  }
+
+  function markInterviewComplete(reason: string) {
+    if (!pendingInterviewComplete) return;
+    const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
+    if (remainingPlaybackMs > 100 && !reason.includes("timeout") && reason !== "relay already closed") {
+      log.info(`Deferring interview_complete by ${remainingPlaybackMs + 800}ms until farewell audio playback finishes`);
+      if (interviewCompleteTimer) {
+        clearTimeout(interviewCompleteTimer);
       }
-
-      function markInterviewComplete(reason: string) {
-        if (!pendingInterviewComplete) return;
-        const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
-        if (remainingPlaybackMs > 100 && !reason.includes("timeout") && reason !== "relay already closed") {
-          log.info(`Deferring interview_complete by ${remainingPlaybackMs + 800}ms until farewell audio playback finishes`);
-          if (interviewCompleteTimer) {
-            clearTimeout(interviewCompleteTimer);
-          }
-          interviewCompleteTimer = setTimeout(() => {
-            if (pendingInterviewComplete) {
-              markInterviewComplete(reason);
-            }
-          }, remainingPlaybackMs + 800);
-          return;
+      interviewCompleteTimer = setTimeout(() => {
+        if (pendingInterviewComplete) {
+          markInterviewComplete(reason);
         }
-        pendingInterviewComplete = false;
-        if (interviewCompleteTimer) {
-          clearTimeout(interviewCompleteTimer);
-          interviewCompleteTimer = null;
-        }
-        send({ type: "interview_complete" });
-        log.info(`Interview complete (${reason})`);
-      }
+      }, remainingPlaybackMs + 800);
+      return;
+    }
+    pendingInterviewComplete = false;
+    if (interviewCompleteTimer) {
+      clearTimeout(interviewCompleteTimer);
+      interviewCompleteTimer = null;
+    }
+    send({ type: "interview_complete" });
+    log.info(`Interview complete (${reason})`);
+  }
 
-      // ── Volcengine Big-Model streaming ASR ──────────────────────────────
-      let volcWs: WebSocket | null = null;
-      let volcAlive = false;
-      let volcAsrAccumulator = "";
-      let volcAsrPreFlushed = false;
-      let volcKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
-      let volcSessionErrorLogged = false;
-      let volcAudioSeq = 1;
+  // ── Volcengine Big-Model streaming ASR ──────────────────────────────
+  let volcWs: WebSocket | null = null;
+  let volcAlive = false;
+  let volcAsrAccumulator = "";
+  let volcAsrPreFlushed = false;
+  let volcKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  let volcSessionErrorLogged = false;
+  let volcAudioSeq = 1;
 
-      async function connectVolcAsr() {
-        if (!USE_VOLC_ASR_INTERIMS) return;
-        if (volcKeepAliveTimer) { clearInterval(volcKeepAliveTimer); volcKeepAliveTimer = null; }
+  async function connectVolcAsr() {
+    if (!USE_VOLC_ASR_INTERIMS) return;
+    if (volcKeepAliveTimer) { clearInterval(volcKeepAliveTimer); volcKeepAliveTimer = null; }
+    try {
+      const reqid = randomUUID().replace(/-/g, "");
+      volcAudioSeq = 1;
+
+      const asrConfig: BigModelAsrConfig = {
+        format: "pcm",
+        rate: 16000,
+        bits: 16,
+        channels: 1,
+        codec: "raw",
+        showUtterance: true,
+        resultType: "single",
+        enablePunc: true,
+        endWindowSize: 500,
+        forceToSpeechTime: 1000,
+      };
+
+      const wsHeaders = buildBigModelHeaders(VOLC_ASR_APPID, VOLC_ASR_TOKEN, reqid);
+      volcWs = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
+
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("Volcengine ASR connect timeout")), 10_000);
+        volcWs!.on("open", () => { clearTimeout(t); resolve(); });
+        volcWs!.on("error", (e) => { clearTimeout(t); reject(e); });
+      });
+
+      // Register message handler BEFORE sending the init request so we
+      // don't miss the ACK or an early error.
+      volcWs.on("message", (data: Buffer) => {
         try {
-          const reqid = randomUUID().replace(/-/g, "");
-          volcAudioSeq = 1;
+          const resp = parseAsrResponse(Buffer.from(data));
 
-          const asrConfig: BigModelAsrConfig = {
-            format: "pcm",
-            rate: 16000,
-            bits: 16,
-            channels: 1,
-            codec: "raw",
-            showUtterance: true,
-            resultType: "single",
-            enablePunc: true,
-            endWindowSize: 500,
-            forceToSpeechTime: 1000,
-          };
-
-          const wsHeaders = buildBigModelHeaders(VOLC_ASR_APPID, VOLC_ASR_TOKEN, reqid);
-          volcWs = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
-
-          await new Promise<void>((resolve, reject) => {
-            const t = setTimeout(() => reject(new Error("Volcengine ASR connect timeout")), 10_000);
-            volcWs!.on("open", () => { clearTimeout(t); resolve(); });
-            volcWs!.on("error", (e) => { clearTimeout(t); reject(e); });
-          });
-
-          // Register message handler BEFORE sending the init request so we
-          // don't miss the ACK or an early error.
-          volcWs.on("message", (data: Buffer) => {
-            try {
-              const resp = parseAsrResponse(Buffer.from(data));
-
-              // SERVER_ACK (0x0b) confirms the init or an audio chunk — mark alive on first one
-              if (resp.messageType === 0x0b) {
-                if (!volcAlive) {
-                  volcAlive = true;
-                  log.info("Volcengine Big-Model ASR connected (ACK received)");
-                  if (USE_VOLC_ASR_PRIMARY) {
-                    setOpenAiTranscriptionEnabled(false, "Volcengine ASR connected");
-                  }
-                }
-                return;
+          // SERVER_ACK (0x0b) confirms the init or an audio chunk — mark alive on first one
+          if (resp.messageType === 0x0b) {
+            if (!volcAlive) {
+              volcAlive = true;
+              log.info("Volcengine Big-Model ASR connected (ACK received)");
+              if (USE_VOLC_ASR_PRIMARY) {
+                setOpenAiTranscriptionEnabled(false, "Volcengine ASR connected");
               }
-
-              if (resp.errorCode || (resp.code && resp.code !== 1000)) {
-                const code = resp.code || resp.errorCode;
-                const isSessionDead = code === 45000081 || code === 55000000;
-                if (!isSessionDead || !volcSessionErrorLogged) {
-                  log.warn(`Volcengine ASR error: code=${code} ${resp.message || resp.errorMessage || ""}`);
-                  if (isSessionDead) volcSessionErrorLogged = true;
-                }
-                if (!volcAlive) {
-                  volcAlive = false;
-                  setOpenAiTranscriptionEnabled(true, `Volcengine ASR error ${code}`);
-                  volcWs?.close();
-                } else if (isSessionDead) {
-                  log.warn("Volcengine ASR session expired — reconnecting...");
-                  volcAlive = false;
-                  volcSessionErrorLogged = false;
-                  setOpenAiTranscriptionEnabled(true, "Volcengine ASR session expired");
-                  volcWs?.close();
-                }
-                return;
-              }
-
-              if (!volcAlive) return;
-
-              if (resp.utterances && resp.utterances.length > 0) {
-                const utt = resp.utterances[0];
-                if (utt.text && !volcAsrPreFlushed) {
-                  handleVolcInterimText(utt.text, "Volc ASR");
-                }
-                if (utt.definite) {
-                  handleVolcFinalText("volc definite", "Volc ASR");
-                }
-              } else if (resp.text && !volcAsrPreFlushed) {
-                handleVolcInterimText(resp.text, "Volc ASR final");
-
-                if (resp.isLastPackage) {
-                  handleVolcFinalText("volc final", "Volc ASR final");
-                }
-              }
-            } catch (err) {
-              log.error("Volcengine ASR parse error:", err);
             }
-          });
+            return;
+          }
 
-          volcWs.send(buildBigModelFullRequest(asrConfig, reqid));
+          if (resp.errorCode || (resp.code && resp.code !== 1000)) {
+            const code = resp.code || resp.errorCode;
+            const isSessionDead = code === 45000081 || code === 55000000;
+            if (!isSessionDead || !volcSessionErrorLogged) {
+              log.warn(`Volcengine ASR error: code=${code} ${resp.message || resp.errorMessage || ""}`);
+              if (isSessionDead) volcSessionErrorLogged = true;
+            }
+            if (!volcAlive) {
+              volcAlive = false;
+              setOpenAiTranscriptionEnabled(true, `Volcengine ASR error ${code}`);
+              volcWs?.close();
+            } else if (isSessionDead) {
+              log.warn("Volcengine ASR session expired — reconnecting...");
+              volcAlive = false;
+              volcSessionErrorLogged = false;
+              setOpenAiTranscriptionEnabled(true, "Volcengine ASR session expired");
+              volcWs?.close();
+            }
+            return;
+          }
 
-          // Mark alive optimistically — the message handler above will set
-          // volcAlive=true on ACK or false on error.  Audio forwarding
-          // checks volcAlive so it's safe to start sending immediately.
-          volcAlive = true;
+          if (!volcAlive) return;
 
-          volcWs.on("close", () => {
-            volcAlive = false;
-            setOpenAiTranscriptionEnabled(true, "Volcengine ASR closed");
-            if (!browserClosed && !interviewDone) reconnectVolcAsr();
-          });
+          if (resp.utterances && resp.utterances.length > 0) {
+            const utt = resp.utterances[0];
+            if (utt.text && !volcAsrPreFlushed) {
+              handleVolcInterimText(utt.text, "Volc ASR");
+            }
+            if (utt.definite) {
+              handleVolcFinalText("volc definite", "Volc ASR");
+            }
+          } else if (resp.text && !volcAsrPreFlushed) {
+            handleVolcInterimText(resp.text, "Volc ASR final");
 
-          volcWs.on("error", (err: Error) => {
-            log.error("Volcengine ASR WS error:", err.message);
-          });
-
-          volcKeepAliveTimer = setInterval(() => {
-            if (!volcAlive || !volcWs || volcWs.readyState !== WebSocket.OPEN) return;
-            volcAudioSeq++;
-            volcWs.send(buildBigModelAudioRequest(Buffer.alloc(3200), volcAudioSeq));
-          }, 5_000);
-
-          log.info("Volcengine Big-Model ASR WebSocket open, waiting for ACK...");
+            if (resp.isLastPackage) {
+              handleVolcFinalText("volc final", "Volc ASR final");
+            }
+          }
         } catch (err) {
-          log.error("Volcengine ASR connection failed:", err instanceof Error ? err.message : err);
-          volcAlive = false;
-          setOpenAiTranscriptionEnabled(true, "Volcengine ASR connection failed");
+          log.error("Volcengine ASR parse error:", err);
         }
-      }
+      });
 
-      function reconnectVolcAsr() {
-        if (browserClosed || interviewDone) return;
-        setTimeout(() => connectVolcAsr(), 2_000);
-      }
+      volcWs.send(buildBigModelFullRequest(asrConfig, reqid));
 
-      function cleanupVolcAsr() {
+      // Mark alive optimistically — the message handler above will set
+      // volcAlive=true on ACK or false on error.  Audio forwarding
+      // checks volcAlive so it's safe to start sending immediately.
+      volcAlive = true;
+
+      volcWs.on("close", () => {
         volcAlive = false;
-        setOpenAiTranscriptionEnabled(true, "Volcengine ASR cleanup");
-        if (volcKeepAliveTimer) { clearInterval(volcKeepAliveTimer); volcKeepAliveTimer = null; }
-        if (volcWs && volcWs.readyState === WebSocket.OPEN) {
-          try {
-            volcAudioSeq++;
-            volcWs.send(buildBigModelAudioRequest(Buffer.alloc(0), volcAudioSeq, true));
-          } catch { /* ignore */ }
-        }
-        volcWs?.close();
-        volcWs = null;
-      }
+        setOpenAiTranscriptionEnabled(true, "Volcengine ASR closed");
+        if (!browserClosed && !interviewDone) reconnectVolcAsr();
+      });
 
-      function sendAudioToVolc(pcm16kBuf: Buffer) {
+      volcWs.on("error", (err: Error) => {
+        log.error("Volcengine ASR WS error:", err.message);
+      });
+
+      volcKeepAliveTimer = setInterval(() => {
         if (!volcAlive || !volcWs || volcWs.readyState !== WebSocket.OPEN) return;
         volcAudioSeq++;
-        volcWs.send(buildBigModelAudioRequest(pcm16kBuf, volcAudioSeq));
-      }
+        volcWs.send(buildBigModelAudioRequest(Buffer.alloc(3200), volcAudioSeq));
+      }, 5_000);
 
-      // Start Volcengine Big-Model ASR
-      connectVolcAsr();
+      log.info("Volcengine Big-Model ASR WebSocket open, waiting for ACK...");
+    } catch (err) {
+      log.error("Volcengine ASR connection failed:", err instanceof Error ? err.message : err);
+      volcAlive = false;
+      setOpenAiTranscriptionEnabled(true, "Volcengine ASR connection failed");
+    }
+  }
 
-      // Keepalive via WebSocket ping
-      let lastAudioSentToOai = Date.now();
-      const keepaliveTimer = setInterval(() => {
-        if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
-        if ((Date.now() - lastAudioSentToOai) > 10_000) {
-          try { oaiWs.ping(); } catch { }
+  function reconnectVolcAsr() {
+    if (browserClosed || interviewDone) return;
+    setTimeout(() => connectVolcAsr(), 2_000);
+  }
+
+  function cleanupVolcAsr() {
+    volcAlive = false;
+    setOpenAiTranscriptionEnabled(true, "Volcengine ASR cleanup");
+    if (volcKeepAliveTimer) { clearInterval(volcKeepAliveTimer); volcKeepAliveTimer = null; }
+    if (volcWs && volcWs.readyState === WebSocket.OPEN) {
+      try {
+        volcAudioSeq++;
+        volcWs.send(buildBigModelAudioRequest(Buffer.alloc(0), volcAudioSeq, true));
+      } catch { /* ignore */ }
+    }
+    volcWs?.close();
+    volcWs = null;
+  }
+
+  function sendAudioToVolc(pcm16kBuf: Buffer) {
+    if (!volcAlive || !volcWs || volcWs.readyState !== WebSocket.OPEN) return;
+    volcAudioSeq++;
+    volcWs.send(buildBigModelAudioRequest(pcm16kBuf, volcAudioSeq));
+  }
+
+  // Start Volcengine Big-Model ASR
+  connectVolcAsr();
+
+  // Keepalive via WebSocket ping
+  let lastAudioSentToOai = Date.now();
+  const keepaliveTimer = setInterval(() => {
+    if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+    if ((Date.now() - lastAudioSentToOai) > 10_000) {
+      try { oaiWs.ping(); } catch { }
+    }
+  }, 10_000);
+
+  // Liveness check
+  const LIVENESS_TIMEOUT_MS = 120_000;
+  const LIVENESS_INPUT_WINDOW_MS = 60_000;
+  const livenessTimer = setInterval(() => {
+    if (browserClosed || interviewDone || reconnecting) return;
+    if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    const userRecentlyActive = (now - lastUserInput) < LIVENESS_INPUT_WINDOW_MS;
+    const oaiSilent = (now - lastOaiActivity) > LIVENESS_TIMEOUT_MS;
+    if (userRecentlyActive && oaiSilent) {
+      log.warn("User is active but OpenAI silent for 2min — forcing reconnect");
+      oaiWs.close();
+    }
+  }, 15_000);
+
+  // ── OpenAI event handler ──────────────────────────────────────────
+
+  function attachOaiHandlers(ws: WebSocket) {
+    ws.on("message", (data: Buffer) => {
+      if (ws !== oaiWs) return;
+      lastOaiActivity = Date.now();
+      try {
+        const msg = JSON.parse(data.toString());
+
+        // Log meaningful events (skip high-frequency audio/transcript deltas)
+        if (msg.type && !msg.type.startsWith("response.output_audio.")
+          && msg.type !== "response.output_audio_transcript.delta"
+          && msg.type !== "input_audio_buffer.speech_started"
+          && msg.type !== "input_audio_buffer.speech_stopped") {
+          log.debug(`OAI event: ${msg.type}`);
         }
-      }, 10_000);
 
-      // Liveness check
-      const LIVENESS_TIMEOUT_MS = 120_000;
-      const LIVENESS_INPUT_WINDOW_MS = 60_000;
-      const livenessTimer = setInterval(() => {
-        if (browserClosed || interviewDone || reconnecting) return;
-        if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
-        const now = Date.now();
-        const userRecentlyActive = (now - lastUserInput) < LIVENESS_INPUT_WINDOW_MS;
-        const oaiSilent = (now - lastOaiActivity) > LIVENESS_TIMEOUT_MS;
-        if (userRecentlyActive && oaiSilent) {
-          log.warn("User is active but OpenAI silent for 2min — forcing reconnect");
-          oaiWs.close();
-        }
-      }, 15_000);
+        switch (msg.type) {
+          // ── Session lifecycle ──
+          case "error": {
+            const errorMessage = msg.error?.message || JSON.stringify(msg.error);
+            if (/Cancellation failed: no active response found/i.test(errorMessage)) {
+              responseInFlight = false;
+              log.debug(`Ignoring benign OpenAI cancel error: ${errorMessage}`);
+              break;
+            }
+            log.error("OpenAI error:", errorMessage);
+            break;
+          }
 
-      // ── OpenAI event handler ──────────────────────────────────────────
+          case "response.created":
+            responseInFlight = true;
+            break;
 
-      function attachOaiHandlers(ws: WebSocket) {
-        ws.on("message", (data: Buffer) => {
-          if (ws !== oaiWs) return;
-          lastOaiActivity = Date.now();
-          try {
-            const msg = JSON.parse(data.toString());
+          // ── ASR events (OpenAI Whisper fallback only) ──
+          case "conversation.item.input_audio_transcription.delta": {
+            if (!openAiTranscriptionEnabled || speechTranscriptCommitted) break;
+            handleWhisperDelta(msg.delta || "");
+            break;
+          }
 
-            // Log meaningful events (skip high-frequency audio/transcript deltas)
-            if (msg.type && !msg.type.startsWith("response.output_audio.")
-              && msg.type !== "response.output_audio_transcript.delta"
-              && msg.type !== "input_audio_buffer.speech_started"
-              && msg.type !== "input_audio_buffer.speech_stopped") {
-              log.debug(`OAI event: ${msg.type}`);
+          case "conversation.item.input_audio_transcription.failed": {
+            if (!openAiTranscriptionEnabled) break;
+            const errMsg = msg.error?.message || JSON.stringify(msg.error);
+            log.error(`ASR transcription failed: ${errMsg}`);
+            break;
+          }
+
+          case "conversation.item.input_audio_transcription.completed": {
+            if (!openAiTranscriptionEnabled) break;
+            const transcript = (msg.transcript || "").trim();
+            if (!transcript) break;
+
+            if (isWhisperHallucination(transcript, ctx.language)) {
+              log.debug(`Whisper hallucination dropped: ${JSON.stringify(transcript)}`);
+              inputTranscriptBuffer = "";
+              break;
             }
 
-            switch (msg.type) {
-              // ── Session lifecycle ──
-              case "error": {
-                const errorMessage = msg.error?.message || JSON.stringify(msg.error);
-                if (/Cancellation failed: no active response found/i.test(errorMessage)) {
-                  responseInFlight = false;
-                  log.debug(`Ignoring benign OpenAI cancel error: ${errorMessage}`);
-                  break;
+            // If user transcript was committed recently (e.g. early flush before ASR completed),
+            // update it with the true completed transcript only if it is a genuine continuation
+            // of the same speech, NOT an overwrite with a completely different sentence!
+            if (speechTranscriptCommitted) {
+              const now = Date.now();
+              const isContinuation =
+                transcript.length > lastCommittedUserTranscript.length &&
+                transcript.toLowerCase().startsWith(lastCommittedUserTranscript.toLowerCase().slice(0, 10));
+              if (
+                !isWhisperHallucination(transcript, ctx.language) &&
+                isContinuation &&
+                now - lastCommittedUserTranscriptAt < 10_000
+              ) {
+                log.info(`Updating recent committed user transcript (${JSON.stringify(lastCommittedUserTranscript)}) with expanded ASR: ${JSON.stringify(transcript)}`);
+                lastCommittedUserTranscript = transcript;
+                lastCommittedUserTranscriptAt = now;
+                send({ type: "asr_ended", text: transcript });
+                updateLastUserHistory(transcript);
+              }
+              break;
+            }
+
+            handleWhisperCompletedTranscript(transcript);
+            break;
+          }
+
+          // ── Model audio output ──
+          case "response.output_audio.delta": {
+            clearQuestionPrompt();
+            modelIsSpeaking = true;
+            if (!isTransitioning && msg.delta) {
+              if (!responseAudioStarted) {
+                responseAudioStarted = true;
+                responseAudioStartedAt = Date.now();
+                for (const t of pendingTtsText) send({ type: "tts_text", data: { text: t, delta: true } });
+                pendingTtsText = [];
+              }
+              lastTtsAudioTime = Date.now();
+              const int16Buf = Buffer.from(msg.delta, "base64");
+              const float32Buf = int16ToFloat32(int16Buf);
+              responseTtsBytes += float32Buf.length;
+              const chunkMs = Math.round((float32Buf.length / 96000) * 1000);
+              ttsPlaybackEndsAt = Math.max(Date.now(), ttsPlaybackEndsAt) + chunkMs;
+              sendBinary(float32Buf);
+            } else if (isTransitioning && msg.delta) {
+              log.warn("Audio suppressed: isTransitioning=true");
+            }
+            break;
+          }
+
+          // ── Model text transcript output ──
+          case "response.output_audio_transcript.delta": {
+            if (msg.delta) {
+              outputTranscriptBuffer += msg.delta;
+              const cleanedDelta = msg.delta.replace(/\[(?:call\s+)?[a-zA-Z0-9_]+(?:\(.*?\))?\]/gi, "");
+              if (cleanedDelta) {
+                if (responseAudioStarted) {
+                  send({ type: "tts_text", data: { text: cleanedDelta, delta: true } });
+                } else {
+                  pendingTtsText.push(cleanedDelta);
                 }
-                log.error("OpenAI error:", errorMessage);
+              }
+            }
+            break;
+          }
+
+          // ── Function call arguments complete ──
+          case "response.function_call_arguments.done": {
+            if (msg.name === "signal_question_change") {
+              let args: { questionIndex?: number; userRequested?: boolean } = {};
+              try { args = JSON.parse(msg.arguments || "{}"); } catch { /* ignore */ }
+              let newIdx = args.questionIndex ?? (currentQuestionIndex + 1);
+              const userRequested = args.userRequested === true;
+
+              // Auto-correct when model passes current index intending to advance (or candidate requested to advance)
+              if (newIdx === currentQuestionIndex) {
+                log.info(`Auto-correcting signal_question_change from current index ${newIdx} to next index ${currentQuestionIndex + 1}`);
+                newIdx = currentQuestionIndex + 1;
+              }
+
+              log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
+
+              // Disallow backward question progression unless the candidate explicitly requested to revisit a previous question.
+              if (newIdx < currentQuestionIndex && !userRequested) {
+                log.warn(`Blocked automatic backward question transition from Q${currentQuestionIndex + 1} to Q${newIdx + 1}`);
+                pendingFunctionCalls.push({
+                  callId: msg.call_id,
+                  name: msg.name,
+                  args: `Automatic backward transitions are not permitted. Continue forward on question ${currentQuestionIndex + 1} or advance to question ${currentQuestionIndex + 2}.`,
+                });
                 break;
               }
 
-              case "response.created":
-                responseInFlight = true;
-                break;
-
-              // ── ASR events (OpenAI Whisper fallback only) ──
-              case "conversation.item.input_audio_transcription.delta": {
-                if (!openAiTranscriptionEnabled || speechTranscriptCommitted) break;
-                handleWhisperDelta(msg.delta || "");
-                break;
-              }
-
-              case "conversation.item.input_audio_transcription.failed": {
-                if (!openAiTranscriptionEnabled) break;
-                const errMsg = msg.error?.message || JSON.stringify(msg.error);
-                log.error(`ASR transcription failed: ${errMsg}`);
+              // Disallow automatic forward advancement only if candidate has not actually spoken any substantive words yet
+              if (newIdx > currentQuestionIndex && !userRequested && userCommittedWordsThisQuestion === 0 && !hasRealUserSpeech()) {
+                log.warn(`Blocked premature automatic question advance from Q${currentQuestionIndex + 1} to Q${newIdx + 1}: candidate has not spoken yet`);
+                pendingFunctionCalls.push({
+                  callId: msg.call_id,
+                  name: msg.name,
+                  args: `The candidate has not provided an answer to question ${currentQuestionIndex + 1} yet. Stay on question ${currentQuestionIndex + 1} and allow the candidate time to answer or ask if they need clarification. Do NOT advance yet.`,
+                });
                 break;
               }
 
-              case "conversation.item.input_audio_transcription.completed": {
-                if (!openAiTranscriptionEnabled) break;
-                const transcript = (msg.transcript || "").trim();
-                if (!transcript) break;
+              clearPendingTransition();
 
-                if (isWhisperHallucination(transcript, ctx.language)) {
-                  log.debug(`Whisper hallucination dropped: ${JSON.stringify(transcript)}`);
-                  inputTranscriptBuffer = "";
-                  break;
-                }
-
-                // If user transcript was committed recently (e.g. early flush before ASR completed),
-                // update it with the true completed transcript only if it is a genuine continuation
-                // of the same speech, NOT an overwrite with a completely different sentence!
-                if (speechTranscriptCommitted) {
-                  const now = Date.now();
-                  const isContinuation =
-                    transcript.length > lastCommittedUserTranscript.length &&
-                    transcript.toLowerCase().startsWith(lastCommittedUserTranscript.toLowerCase().slice(0, 10));
-                  if (
-                    !isWhisperHallucination(transcript, ctx.language) &&
-                    isContinuation &&
-                    now - lastCommittedUserTranscriptAt < 10_000
-                  ) {
-                    log.info(`Updating recent committed user transcript (${JSON.stringify(lastCommittedUserTranscript)}) with expanded ASR: ${JSON.stringify(transcript)}`);
-                    lastCommittedUserTranscript = transcript;
-                    lastCommittedUserTranscriptAt = now;
-                    send({ type: "asr_ended", text: transcript });
-                    updateLastUserHistory(transcript);
-                  }
-                  break;
-                }
-
-                handleWhisperCompletedTranscript(transcript);
-                break;
+              let result: string;
+              if (newIdx >= sortedQuestions.length) {
+                result = "Interview is now complete. Please give a brief farewell.";
+              } else {
+                result = `Moved to question ${newIdx + 1}: "${sortedQuestions[newIdx]?.text}". Please naturally transition and ask this question.`;
               }
 
-              // ── Model audio output ──
-              case "response.output_audio.delta": {
-                clearQuestionPrompt();
-                modelIsSpeaking = true;
-                if (!isTransitioning && msg.delta) {
-                  if (!responseAudioStarted) {
-                    responseAudioStarted = true;
-                    responseAudioStartedAt = Date.now();
-                    for (const t of pendingTtsText) send({ type: "tts_text", data: { text: t, delta: true } });
-                    pendingTtsText = [];
-                  }
-                  lastTtsAudioTime = Date.now();
-                  const int16Buf = Buffer.from(msg.delta, "base64");
-                  const float32Buf = int16ToFloat32(int16Buf);
-                  responseTtsBytes += float32Buf.length;
-                  const chunkMs = Math.round((float32Buf.length / 96000) * 1000);
-                  ttsPlaybackEndsAt = Math.max(Date.now(), ttsPlaybackEndsAt) + chunkMs;
-                  sendBinary(float32Buf);
-                } else if (isTransitioning && msg.delta) {
-                  log.warn("Audio suppressed: isTransitioning=true");
-                }
-                break;
-              }
-
-              // ── Model text transcript output ──
-              case "response.output_audio_transcript.delta": {
-                if (msg.delta) {
-                  outputTranscriptBuffer += msg.delta;
-                  const cleanedDelta = msg.delta.replace(/\[(?:call\s+)?[a-zA-Z0-9_]+(?:\(.*?\))?\]/gi, "");
-                  if (cleanedDelta) {
-                    if (responseAudioStarted) {
-                      send({ type: "tts_text", data: { text: cleanedDelta, delta: true } });
-                    } else {
-                      pendingTtsText.push(cleanedDelta);
+              if (newIdx >= sortedQuestions.length) {
+                if (!interviewDone) {
+                  interviewDone = true;
+                  pendingInterviewComplete = true;
+                  log.info("Interview ending — waiting for farewell TTS to finish");
+                  interviewCompleteTimer = setTimeout(() => {
+                    if (pendingInterviewComplete) {
+                      markInterviewComplete("timeout fallback");
                     }
-                  }
+                  }, 15_000);
                 }
-                break;
+              } else if (newIdx >= 0 && newIdx !== currentQuestionIndex) {
+                const dir = newIdx > currentQuestionIndex ? "next" : "previous";
+                const arrow = dir === "next" ? "→" : "←";
+                send({ type: "transitioning", auto: true, direction: dir });
+                currentQuestionIndex = newIdx;
+                questionEnteredAt = Date.now();
+                userCommittedWordsThisQuestion = 0;
+                userSpokeThisTurn = false;
+                nudgeCountThisQuestion = 0;
+                clearSilenceGapTimer();
+                disableTools();
+                send({
+                  type: "question_change",
+                  questionIndex: currentQuestionIndex,
+                  totalQuestions: sortedQuestions.length,
+                  auto: true,
+                });
+                pushHistory("user", `[Moved to question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}"]`);
+                log.info(`${arrow} Q${currentQuestionIndex + 1}/${sortedQuestions.length}`);
               }
 
-              // ── Function call arguments complete ──
-              case "response.function_call_arguments.done": {
-                if (msg.name === "signal_question_change") {
-                  let args: { questionIndex?: number; userRequested?: boolean } = {};
-                  try { args = JSON.parse(msg.arguments || "{}"); } catch { /* ignore */ }
-                  let newIdx = args.questionIndex ?? (currentQuestionIndex + 1);
-                  const userRequested = args.userRequested === true;
+              // Store for batch response after response.done
+              pendingFunctionCalls.push({
+                callId: msg.call_id,
+                name: msg.name,
+                args: result,
+              });
+            }
+            break;
+          }
 
-                  // Auto-correct when model passes current index intending to advance (or candidate requested to advance)
-                  if (newIdx === currentQuestionIndex) {
-                    log.info(`Auto-correcting signal_question_change from current index ${newIdx} to next index ${currentQuestionIndex + 1}`);
-                    newIdx = currentQuestionIndex + 1;
-                  }
+          // ── VAD events ──
+          case "input_audio_buffer.speech_started":
+            handleSpeechStartedEvent();
+            break;
 
-                  log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
+          case "input_audio_buffer.speech_stopped":
+            handleSpeechStoppedEvent();
+            break;
 
-                  // Disallow backward question progression unless the candidate explicitly requested to revisit a previous question.
-                  if (newIdx < currentQuestionIndex && !userRequested) {
-                    log.warn(`Blocked automatic backward question transition from Q${currentQuestionIndex + 1} to Q${newIdx + 1}`);
-                    pendingFunctionCalls.push({
-                      callId: msg.call_id,
-                      name: msg.name,
-                      args: `Automatic backward transitions are not permitted. Continue forward on question ${currentQuestionIndex + 1} or advance to question ${currentQuestionIndex + 2}.`,
-                    });
-                    break;
-                  }
+          // ── Response complete ──
+          case "response.done": {
+            const respStatus = msg.response?.status || "unknown";
+            const respOutputCount = msg.response?.output?.length ?? 0;
+            responseInFlight = false;
+            const queuedResponse = takeQueuedAssistantResponse();
 
-                  // Disallow automatic forward advancement only if candidate has not actually spoken any substantive words yet
-                  if (newIdx > currentQuestionIndex && !userRequested && userCommittedWordsThisQuestion === 0 && !hasRealUserSpeech()) {
-                    log.warn(`Blocked premature automatic question advance from Q${currentQuestionIndex + 1} to Q${newIdx + 1}: candidate has not spoken yet`);
-                    pendingFunctionCalls.push({
-                      callId: msg.call_id,
-                      name: msg.name,
-                      args: `The candidate has not provided an answer to question ${currentQuestionIndex + 1} yet. Stay on question ${currentQuestionIndex + 1} and allow the candidate time to answer or ask if they need clarification. Do NOT advance yet.`,
-                    });
-                    break;
-                  }
+            // Flush pending ASR debounce
+            if (pendingAsrUpdate) {
+              clearTimeout(pendingAsrUpdate);
+              pendingAsrUpdate = null;
+              if (inputTranscriptBuffer) {
+                send({ type: "asr", data: { results: [{ text: inputTranscriptBuffer }] } });
+              }
+            }
 
-                  clearPendingTransition();
+            const hadTts = !!(outputTranscriptBuffer || modelIsSpeaking);
+            const capturedModelText = outputTranscriptBuffer;
+            outputTranscriptBuffer = "";
+            modelIsSpeaking = false;
+            lastAssistantAudioEndedAt = Math.max(Date.now(), ttsPlaybackEndsAt);
+            const inferredFarewell =
+              !pendingInterviewComplete &&
+              !!capturedModelText &&
+              looksLikeFarewell(capturedModelText, isZh);
 
-                  let result: string;
-                  if (newIdx >= sortedQuestions.length) {
-                    result = "Interview is now complete. Please give a brief farewell.";
-                  } else {
-                    result = `Moved to question ${newIdx + 1}: "${sortedQuestions[newIdx]?.text}". Please naturally transition and ask this question.`;
-                  }
+            if (inferredFarewell) {
+              interviewDone = true;
+              pendingInterviewComplete = true;
+              log.warn(`Inferred interview completion from farewell text: "${capturedModelText.slice(0, 60)}"`);
+            }
+            const completedFarewellTurn = (pendingInterviewComplete || inferredFarewell) && hadTts && responseTtsBytes > 0;
 
-                  if (newIdx >= sortedQuestions.length) {
-                    if (!interviewDone) {
-                      interviewDone = true;
-                      pendingInterviewComplete = true;
-                      log.info("Interview ending — waiting for farewell TTS to finish");
-                      interviewCompleteTimer = setTimeout(() => {
-                        if (pendingInterviewComplete) {
-                          markInterviewComplete("timeout fallback");
-                        }
-                      }, 15_000);
-                    }
-                  } else if (newIdx >= 0 && newIdx !== currentQuestionIndex) {
-                    const dir = newIdx > currentQuestionIndex ? "next" : "previous";
-                    const arrow = dir === "next" ? "→" : "←";
-                    send({ type: "transitioning", auto: true, direction: dir });
-                    currentQuestionIndex = newIdx;
-                    questionEnteredAt = Date.now();
-                    userCommittedWordsThisQuestion = 0;
-                    userSpokeThisTurn = false;
-                    nudgeCountThisQuestion = 0;
-                    clearSilenceGapTimer();
-                    disableTools();
+            if (hadTts && responseTtsBytes > 0) {
+              ttsPlaybackEndsAt = Math.max(ttsPlaybackEndsAt, Date.now() + 500);
+              // Flush any pending user text BEFORE committing agent text
+              // so the transcript order matches the conversation order.
+              flushPendingUserTurnBeforeAssistant();
+              if (inputTranscriptBuffer) {
+                flushUserInput();
+              }
+              if (capturedModelText) {
+                const textToolMatch = capturedModelText.match(/\[(?:call\s+)?signal_question_change(?:\(questionIndex=(\d+)\))?\]/i);
+                if (textToolMatch && pendingFunctionCalls.length === 0) {
+                  const parsedIdx = textToolMatch[1] !== undefined ? parseInt(textToolMatch[1], 10) : currentQuestionIndex + 1;
+                  log.warn(`Model emitted signal_question_change as text instead of tool call (idx=${parsedIdx}) — auto-advancing question`);
+                  if (parsedIdx >= sortedQuestions.length) {
+                    interviewDone = true;
+                    pendingInterviewComplete = true;
+                  } else if (parsedIdx >= 0 && parsedIdx !== currentQuestionIndex) {
+                    currentQuestionIndex = parsedIdx;
                     send({
                       type: "question_change",
                       questionIndex: currentQuestionIndex,
                       totalQuestions: sortedQuestions.length,
                       auto: true,
                     });
-                    pushHistory("user", `[Moved to question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}"]`);
-                    log.info(`${arrow} Q${currentQuestionIndex + 1}/${sortedQuestions.length}`);
                   }
-
-                  // Store for batch response after response.done
-                  pendingFunctionCalls.push({
-                    callId: msg.call_id,
-                    name: msg.name,
-                    args: result,
-                  });
                 }
-                break;
+
+                const sanitizedModelText = capturedModelText
+                  .replace(/\[(?:call\s+)?signal_question_change(?:\(.*?\))?\]/gi, "")
+                  .trim();
+                log.info(`TTS done (${responseTtsBytes}B sent): ${JSON.stringify(sanitizedModelText)}`);
+                pushHistory("assistant", sanitizedModelText);
+                send({ type: "tts_ended", text: sanitizedModelText });
+                send({ type: "chat", data: { text: sanitizedModelText } });
+              } else {
+                send({ type: "tts_ended" });
               }
-
-              // ── VAD events ──
-              case "input_audio_buffer.speech_started":
-                handleSpeechStartedEvent();
-                break;
-
-              case "input_audio_buffer.speech_stopped":
-                handleSpeechStoppedEvent();
-                break;
-
-              // ── Response complete ──
-              case "response.done": {
-                const respStatus = msg.response?.status || "unknown";
-                const respOutputCount = msg.response?.output?.length ?? 0;
-                responseInFlight = false;
-                const queuedResponse = takeQueuedAssistantResponse();
-
-                // Flush pending ASR debounce
-                if (pendingAsrUpdate) {
-                  clearTimeout(pendingAsrUpdate);
-                  pendingAsrUpdate = null;
-                  if (inputTranscriptBuffer) {
-                    send({ type: "asr", data: { results: [{ text: inputTranscriptBuffer }] } });
-                  }
-                }
-
-                const hadTts = !!(outputTranscriptBuffer || modelIsSpeaking);
-                const capturedModelText = outputTranscriptBuffer;
-                outputTranscriptBuffer = "";
-                modelIsSpeaking = false;
-                lastAssistantAudioEndedAt = Math.max(Date.now(), ttsPlaybackEndsAt);
-                const inferredFarewell =
-                  !pendingInterviewComplete &&
-                  !!capturedModelText &&
-                  looksLikeFarewell(capturedModelText, isZh);
-
-                if (inferredFarewell) {
-                  interviewDone = true;
-                  pendingInterviewComplete = true;
-                  log.warn(`Inferred interview completion from farewell text: "${capturedModelText.slice(0, 60)}"`);
-                }
-                const completedFarewellTurn = (pendingInterviewComplete || inferredFarewell) && hadTts && responseTtsBytes > 0;
-
-                if (hadTts && responseTtsBytes > 0) {
-                  ttsPlaybackEndsAt = Math.max(ttsPlaybackEndsAt, Date.now() + 500);
-                  // Flush any pending user text BEFORE committing agent text
-                  // so the transcript order matches the conversation order.
-                  flushPendingUserTurnBeforeAssistant();
-                  if (inputTranscriptBuffer) {
-                    flushUserInput();
-                  }
-                  if (capturedModelText) {
-                    const textToolMatch = capturedModelText.match(/\[(?:call\s+)?signal_question_change(?:\(questionIndex=(\d+)\))?\]/i);
-                    if (textToolMatch && pendingFunctionCalls.length === 0) {
-                      const parsedIdx = textToolMatch[1] !== undefined ? parseInt(textToolMatch[1], 10) : currentQuestionIndex + 1;
-                      log.warn(`Model emitted signal_question_change as text instead of tool call (idx=${parsedIdx}) — auto-advancing question`);
-                      if (parsedIdx >= sortedQuestions.length) {
-                        interviewDone = true;
-                        pendingInterviewComplete = true;
-                      } else if (parsedIdx >= 0 && parsedIdx !== currentQuestionIndex) {
-                        currentQuestionIndex = parsedIdx;
-                        send({
-                          type: "question_change",
-                          questionIndex: currentQuestionIndex,
-                          totalQuestions: sortedQuestions.length,
-                          auto: true,
-                        });
-                      }
-                    }
-
-                    const sanitizedModelText = capturedModelText
-                      .replace(/\[(?:call\s+)?signal_question_change(?:\(.*?\))?\]/gi, "")
-                      .trim();
-                    log.info(`TTS done (${responseTtsBytes}B sent): ${JSON.stringify(sanitizedModelText)}`);
-                    pushHistory("assistant", sanitizedModelText);
-                    send({ type: "tts_ended", text: sanitizedModelText });
-                    send({ type: "chat", data: { text: sanitizedModelText } });
-                  } else {
-                    send({ type: "tts_ended" });
-                  }
-                  userSpokeThisTurn = false;
-                  inputTranscriptBuffer = "";
-                  volcAsrAccumulator = "";
-                  speechTranscriptCommitted = false;
-                  vadSpeechActive = false;
-                  userSpeechGateOpen = false;
-                  if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
-                    oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  }
-                  send({ type: "asr", data: { results: [{ text: "" }] } });
-                  send({ type: "asr_ended", text: "" });
-                  const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
-                  const thinkingSilenceDelayMs = remainingPlaybackMs + INITIAL_THINKING_SILENCE_MS;
-                  startSilenceGapTimer(thinkingSilenceDelayMs);
-                } else if (hadTts) {
-                  log.info(`TTS interrupted before audio (0B): ${JSON.stringify(capturedModelText)}`);
-                  pendingTtsText = [];
-                  if (lastUserInput === 0 && pendingFunctionCalls.length === 0 && !interviewDone) {
-                    log.warn("Greeting produced 0B audio — auto-retrying");
-                    requestAssistantResponse("greeting retry", { tool_choice: "none" });
-                  }
-                }
-                responseTtsBytes = 0;
-                responseAudioStarted = false;
-                responseAudioStartedAt = 0;
-
-                // Detect empty responses and retry: the model sometimes
-                // produces responses with no audio and no function calls.
-                if (!hadTts && pendingFunctionCalls.length === 0 && respOutputCount === 0 && !interviewDone && !queuedResponse) {
-                  emptyResponseRetries++;
-                  if (emptyResponseRetries <= MAX_EMPTY_RETRIES) {
-                    log.warn(`Empty response (status=${respStatus}, attempt ${emptyResponseRetries}/${MAX_EMPTY_RETRIES}) — nudging model to speak`);
-                    requestAssistantResponse(`empty response retry ${emptyResponseRetries}`);
-                  } else {
-                    log.error(`Empty response (status=${respStatus}) — exhausted retries, giving up`);
-                    emptyResponseRetries = 0;
-                    const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
-                  const thinkingSilenceDelayMs = remainingPlaybackMs + INITIAL_THINKING_SILENCE_MS;
-                  startSilenceGapTimer(thinkingSilenceDelayMs);
-                  }
-                } else if (hadTts) {
-                  emptyResponseRetries = 0;
-                }
-
-                // Send function call results and trigger follow-up response
-                if (pendingFunctionCalls.length > 0) {
-                  if (queuedResponse) {
-                    queuedAssistantResponse = queuedResponse;
-                  }
-                  const calls = [...pendingFunctionCalls];
-                  pendingFunctionCalls = [];
-                  for (const fc of calls) {
-                    ws.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "function_call_output",
-                        call_id: fc.callId,
-                        output: fc.args,
-                      },
-                    }));
-                  }
-                  // Only request follow-up speech if the assistant did not already deliver spoken TTS in this response
-                  if (!hadTts) {
-                    requestAssistantResponse("function call follow-up");
-                  }
-                } else if (queuedResponse) {
-                  requestAssistantResponse(`queued after ${queuedResponse.reason}`, queuedResponse.response);
-                }
-
-                if (completedFarewellTurn) {
-                  markInterviewComplete("after farewell");
-                }
-
-                if (inputTranscriptBuffer) {
-                  scheduleInputFlush();
-                }
-                break;
+              userSpokeThisTurn = false;
+              inputTranscriptBuffer = "";
+              volcAsrAccumulator = "";
+              speechTranscriptCommitted = false;
+              vadSpeechActive = false;
+              userSpeechGateOpen = false;
+              if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+                oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              }
+              send({ type: "asr", data: { results: [{ text: "" }] } });
+              send({ type: "asr_ended", text: "" });
+              const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
+              const thinkingSilenceDelayMs = remainingPlaybackMs + INITIAL_THINKING_SILENCE_MS;
+              startSilenceGapTimer(thinkingSilenceDelayMs);
+            } else if (hadTts) {
+              log.info(`TTS interrupted before audio (0B): ${JSON.stringify(capturedModelText)}`);
+              pendingTtsText = [];
+              if (lastUserInput === 0 && pendingFunctionCalls.length === 0 && !interviewDone) {
+                log.warn("Greeting produced 0B audio — auto-retrying");
+                requestAssistantResponse("greeting retry", { tool_choice: "none" });
               }
             }
-          } catch (err) {
-            log.error("Error parsing OpenAI message:", err);
-          }
-        });
+            responseTtsBytes = 0;
+            responseAudioStarted = false;
+            responseAudioStartedAt = 0;
 
-        ws.on("close", () => {
-          if (ws !== oaiWs) return;
-          const sessionDuration = ((Date.now() - oaiSessionStart) / 1000).toFixed(1);
-          log.info(`OpenAI WS closed (session lasted ${sessionDuration}s)`);
-          oaiWs = null;
-
-          if (browserClosed || interviewDone) return;
-
-          if (pendingInputFlush) { clearTimeout(pendingInputFlush); pendingInputFlush = null; }
-          if (pendingAsrUpdate) { clearTimeout(pendingAsrUpdate); pendingAsrUpdate = null; }
-          if (fiveMinuteWarningTimer) { clearTimeout(fiveMinuteWarningTimer); fiveMinuteWarningTimer = null; }
-
-          if (inputTranscriptBuffer) {
-            pushHistory("user", inputTranscriptBuffer);
-          }
-          if (outputTranscriptBuffer) {
-            pushHistory("assistant", outputTranscriptBuffer);
-            outputTranscriptBuffer = "";
-          }
-          modelIsSpeaking = false;
-          responseInFlight = false;
-          responseAudioStarted = false;
-          responseAudioStartedAt = 0;
-          pendingTtsText = [];
-          pendingFunctionCalls = [];
-
-          send({ type: "session_reconnecting" });
-
-          log.info("Attempting auto-reconnect...");
-          reconnectOai().catch((err) => {
-            log.error("Reconnect failed:", err);
-            if (browserWs.readyState === WebSocket.OPEN) {
-              send({ type: "disconnected" });
-              browserWs.close();
-            }
-          });
-        });
-
-        ws.on("error", (err: Error) => {
-          log.error("OpenAI WS error:", err.message);
-        });
-      }
-
-      // ── OpenAI connection ─────────────────────────────────────────────
-
-      async function connectOai(): Promise<WebSocket> {
-        const ws = new WebSocket(OPENAI_WS_URL, {
-          headers: OPENAI_WS_HEADERS,
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          const t = setTimeout(() => reject(new Error("OpenAI connect timeout")), 10_000);
-          ws.on("open", () => { clearTimeout(t); resolve(); });
-          ws.on("error", (e) => { clearTimeout(t); reject(e); });
-        });
-
-        // Wait for session.created and log default config
-        await new Promise<void>((resolve, reject) => {
-          const t = setTimeout(() => reject(new Error("Session create timeout")), 10_000);
-          const h = (data: Buffer) => {
-            try {
-              const msg = JSON.parse(data.toString());
-              if (msg.type === "session.created") {
-                clearTimeout(t);
-                ws.removeListener("message", h);
-                log.info("Session created — default config keys:", Object.keys(msg.session || {}));
-                resolve();
-              } else if (msg.type === "error") {
-                clearTimeout(t);
-                ws.removeListener("message", h);
-                log.error("OpenAI session.create error:", msg.error);
-                reject(new Error(msg.error?.message || "Session create error"));
+            // Detect empty responses and retry: the model sometimes
+            // produces responses with no audio and no function calls.
+            if (!hadTts && pendingFunctionCalls.length === 0 && respOutputCount === 0 && !interviewDone && !queuedResponse) {
+              emptyResponseRetries++;
+              if (emptyResponseRetries <= MAX_EMPTY_RETRIES) {
+                log.warn(`Empty response (status=${respStatus}, attempt ${emptyResponseRetries}/${MAX_EMPTY_RETRIES}) — nudging model to speak`);
+                requestAssistantResponse(`empty response retry ${emptyResponseRetries}`);
+              } else {
+                log.error(`Empty response (status=${respStatus}) — exhausted retries, giving up`);
+                emptyResponseRetries = 0;
+                const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
+                const thinkingSilenceDelayMs = remainingPlaybackMs + INITIAL_THINKING_SILENCE_MS;
+                startSilenceGapTimer(thinkingSilenceDelayMs);
               }
-            } catch { /* ignore */ }
-          };
-          ws.on("message", h);
-        });
-
-        const systemPrompt = buildSystemPrompt(ctx, currentQuestionIndex);
-
-        ws.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            type: "realtime",
-            instructions: systemPrompt,
-            output_modalities: ["audio"],
-            audio: {
-              input: buildRealtimeAudioInputConfig(),
-              output: {
-                format: { type: "audio/pcm", rate: 24000 },
-                voice: AZURE_VOICE,
-              },
-            },
-            tools: OPENAI_TOOLS,
-            tool_choice: "auto",
-          },
-        }));
-
-        // Wait for session.updated and log effective config
-        await new Promise<void>((resolve, reject) => {
-          const t = setTimeout(() => reject(new Error("Session update timeout")), 10_000);
-          const h = (data: Buffer) => {
-            try {
-              const msg = JSON.parse(data.toString());
-              if (msg.type === "session.updated") {
-                clearTimeout(t);
-                ws.removeListener("message", h);
-                const s = msg.session || {};
-                const audioIn = s.audio?.input || {};
-                log.info("Session updated — transcription:", JSON.stringify(audioIn.transcription), "turn_detection:", audioIn.turn_detection?.type, "noise_reduction:", JSON.stringify(audioIn.noise_reduction));
-                resolve();
-              } else if (msg.type === "error") {
-                clearTimeout(t);
-                ws.removeListener("message", h);
-                log.error("Session update error:", JSON.stringify(msg.error));
-                reject(new Error(msg.error?.message || "Session update error"));
-              }
-            } catch { /* ignore */ }
-          };
-          ws.on("message", h);
-        });
-
-        return ws;
-      }
-
-      async function reconnectOai() {
-        if (reconnecting) return;
-        reconnecting = true;
-        const MAX_RETRIES = 3;
-
-        await new Promise((r) => setTimeout(r, 500));
-
-        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-          try {
-            log.info(`Reconnect attempt ${attempt}/${MAX_RETRIES}...`);
-
-            const ws = await connectOai();
-            oaiWs = ws;
-            oaiSessionStart = Date.now();
-            lastOaiActivity = Date.now();
-            lastAudioSentToOai = Date.now();
-            attachOaiHandlers(ws);
-
-            // OpenAI doesn't have session resumption tokens —
-            // replay conversation history to restore context.
-            let codeContext = "";
-            if (latestCode) {
-              codeContext = `\n\nThe participant's current code (${latestCodeLanguage}):\n\`\`\`${latestCodeLanguage}\n${latestCode}\n\`\`\``;
+            } else if (hadTts) {
+              emptyResponseRetries = 0;
             }
-            const resumePrompt = `[SYSTEM] Session reconnected. The UI currently shows question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}".${codeContext}\nDo NOT re-introduce yourself, re-ask the current question, or repeat anything you've already said. Wait silently for the participant to speak, then respond naturally. If you were in the middle of saying something, do NOT repeat it.`;
 
-            if (conversationHistory.length > 0) {
-              const MAX_REPLAY_TURNS = 12;
-              const recentHistory = conversationHistory.length > MAX_REPLAY_TURNS
-                ? conversationHistory.slice(-MAX_REPLAY_TURNS)
-                : conversationHistory;
-
-              for (const h of recentHistory) {
+            // Send function call results and trigger follow-up response
+            if (pendingFunctionCalls.length > 0) {
+              if (queuedResponse) {
+                queuedAssistantResponse = queuedResponse;
+              }
+              const calls = [...pendingFunctionCalls];
+              pendingFunctionCalls = [];
+              for (const fc of calls) {
                 ws.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
-                    type: "message",
-                    role: h.role,
-                    content: [{ type: h.role === "assistant" ? "output_text" : "input_text", text: h.text }],
+                    type: "function_call_output",
+                    call_id: fc.callId,
+                    output: fc.args,
                   },
                 }));
               }
-              log.info(`Replayed ${recentHistory.length}/${conversationHistory.length} history turns`);
+              // Only request follow-up speech if the assistant did not already deliver spoken TTS in this response
+              if (!hadTts) {
+                requestAssistantResponse("function call follow-up");
+              }
+            } else if (queuedResponse) {
+              requestAssistantResponse(`queued after ${queuedResponse.reason}`, queuedResponse.response);
             }
 
-            // Send resume prompt as system message
+            if (completedFarewellTurn) {
+              markInterviewComplete("after farewell");
+            }
+
+            if (inputTranscriptBuffer) {
+              scheduleInputFlush();
+            }
+            break;
+          }
+        }
+      } catch (err) {
+        log.error("Error parsing OpenAI message:", err);
+      }
+    });
+
+    ws.on("close", () => {
+      if (ws !== oaiWs) return;
+      const sessionDuration = ((Date.now() - oaiSessionStart) / 1000).toFixed(1);
+      log.info(`OpenAI WS closed (session lasted ${sessionDuration}s)`);
+      oaiWs = null;
+
+      if (browserClosed || interviewDone) return;
+
+      if (pendingInputFlush) { clearTimeout(pendingInputFlush); pendingInputFlush = null; }
+      if (pendingAsrUpdate) { clearTimeout(pendingAsrUpdate); pendingAsrUpdate = null; }
+      if (fiveMinuteWarningTimer) { clearTimeout(fiveMinuteWarningTimer); fiveMinuteWarningTimer = null; }
+
+      if (inputTranscriptBuffer) {
+        pushHistory("user", inputTranscriptBuffer);
+      }
+      if (outputTranscriptBuffer) {
+        pushHistory("assistant", outputTranscriptBuffer);
+        outputTranscriptBuffer = "";
+      }
+      modelIsSpeaking = false;
+      responseInFlight = false;
+      responseAudioStarted = false;
+      responseAudioStartedAt = 0;
+      pendingTtsText = [];
+      pendingFunctionCalls = [];
+
+      send({ type: "session_reconnecting" });
+
+      log.info("Attempting auto-reconnect...");
+      reconnectOai().catch((err) => {
+        log.error("Reconnect failed:", err);
+        if (browserWs.readyState === WebSocket.OPEN) {
+          send({ type: "disconnected" });
+          browserWs.close();
+        }
+      });
+    });
+
+    ws.on("error", (err: Error) => {
+      log.error("OpenAI WS error:", err.message);
+    });
+  }
+
+  // ── OpenAI connection ─────────────────────────────────────────────
+
+  async function connectOai(): Promise<WebSocket> {
+    const ws = new WebSocket(OPENAI_WS_URL, {
+      headers: OPENAI_WS_HEADERS,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("OpenAI connect timeout")), 10_000);
+      ws.on("open", () => { clearTimeout(t); resolve(); });
+      ws.on("error", (e) => { clearTimeout(t); reject(e); });
+    });
+
+    // Wait for session.created and log default config
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("Session create timeout")), 10_000);
+      const h = (data: Buffer) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === "session.created") {
+            clearTimeout(t);
+            ws.removeListener("message", h);
+            log.info("Session created — default config keys:", Object.keys(msg.session || {}));
+            resolve();
+          } else if (msg.type === "error") {
+            clearTimeout(t);
+            ws.removeListener("message", h);
+            log.error("OpenAI session.create error:", msg.error);
+            reject(new Error(msg.error?.message || "Session create error"));
+          }
+        } catch { /* ignore */ }
+      };
+      ws.on("message", h);
+    });
+
+    const systemPrompt = buildSystemPrompt(ctx, currentQuestionIndex);
+
+    ws.send(JSON.stringify({
+      type: "session.update",
+      session: {
+        type: "realtime",
+        instructions: systemPrompt,
+        output_modalities: ["audio"],
+        audio: {
+          input: buildRealtimeAudioInputConfig(),
+          output: {
+            format: { type: "audio/pcm", rate: 24000 },
+            voice: AZURE_VOICE,
+          },
+        },
+        tools: OPENAI_TOOLS,
+        tool_choice: "auto",
+      },
+    }));
+
+    // Wait for session.updated and log effective config
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("Session update timeout")), 10_000);
+      const h = (data: Buffer) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === "session.updated") {
+            clearTimeout(t);
+            ws.removeListener("message", h);
+            const s = msg.session || {};
+            const audioIn = s.audio?.input || {};
+            log.info("Session updated — transcription:", JSON.stringify(audioIn.transcription), "turn_detection:", audioIn.turn_detection?.type, "noise_reduction:", JSON.stringify(audioIn.noise_reduction));
+            resolve();
+          } else if (msg.type === "error") {
+            clearTimeout(t);
+            ws.removeListener("message", h);
+            log.error("Session update error:", JSON.stringify(msg.error));
+            reject(new Error(msg.error?.message || "Session update error"));
+          }
+        } catch { /* ignore */ }
+      };
+      ws.on("message", h);
+    });
+
+    return ws;
+  }
+
+  async function reconnectOai() {
+    if (reconnecting) return;
+    reconnecting = true;
+    const MAX_RETRIES = 3;
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        log.info(`Reconnect attempt ${attempt}/${MAX_RETRIES}...`);
+
+        const ws = await connectOai();
+        oaiWs = ws;
+        oaiSessionStart = Date.now();
+        lastOaiActivity = Date.now();
+        lastAudioSentToOai = Date.now();
+        attachOaiHandlers(ws);
+
+        // OpenAI doesn't have session resumption tokens —
+        // replay conversation history to restore context.
+        let codeContext = "";
+        if (latestCode) {
+          codeContext = `\n\nThe participant's current code (${latestCodeLanguage}):\n\`\`\`${latestCodeLanguage}\n${latestCode}\n\`\`\``;
+        }
+        const resumePrompt = `[SYSTEM] Session reconnected. The UI currently shows question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}".${codeContext}\nDo NOT re-introduce yourself, re-ask the current question, or repeat anything you've already said. Wait silently for the participant to speak, then respond naturally. If you were in the middle of saying something, do NOT repeat it.`;
+
+        if (conversationHistory.length > 0) {
+          const MAX_REPLAY_TURNS = 12;
+          const recentHistory = conversationHistory.length > MAX_REPLAY_TURNS
+            ? conversationHistory.slice(-MAX_REPLAY_TURNS)
+            : conversationHistory;
+
+          for (const h of recentHistory) {
             ws.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
                 type: "message",
-                role: "system",
-                content: [{ type: "input_text", text: resumePrompt }],
+                role: h.role,
+                content: [{ type: h.role === "assistant" ? "output_text" : "input_text", text: h.text }],
               },
             }));
-
-            log.info("Reconnected successfully");
-            modelIsSpeaking = false;
-            responseInFlight = false;
-            responseAudioStarted = false;
-            responseAudioStartedAt = 0;
-            pendingTtsText = [];
-            reconnecting = false;
-            send({ type: "session_reconnected" });
-            startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
-
-            if (pendingQuestionPrompt) {
-              const prompt = pendingQuestionPrompt;
-              pendingQuestionPrompt = null;
-              if (pendingPromptTimer) { clearTimeout(pendingPromptTimer); pendingPromptTimer = null; }
-              sendQuestionPrompt(prompt);
-            }
-            return;
-          } catch (err) {
-            log.warn(`Reconnect attempt ${attempt} failed:`, err);
-            if (attempt < MAX_RETRIES) {
-              await new Promise((r) => setTimeout(r, 1000 * attempt));
-            }
           }
+          log.info(`Replayed ${recentHistory.length}/${conversationHistory.length} history turns`);
         }
 
+        // Send resume prompt as system message
+        ws.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{ type: "input_text", text: resumePrompt }],
+          },
+        }));
+
+        log.info("Reconnected successfully");
+        modelIsSpeaking = false;
+        responseInFlight = false;
+        responseAudioStarted = false;
+        responseAudioStartedAt = 0;
+        pendingTtsText = [];
         reconnecting = false;
-        throw new Error("All reconnect attempts failed");
-      }
+        send({ type: "session_reconnected" });
+        startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
 
-      // ── Initial connection ────────────────────────────────────────────
-
-      try {
-        oaiWs = await connectOai();
-        oaiSessionStart = Date.now();
-        log.info("OpenAI session established");
-        scheduleFiveMinuteWarning();
-        attachOaiHandlers(oaiWs);
-
-        send({ type: "ready", sessionId: "openai-session" });
-        send({
-          type: "question_change",
-          questionIndex: currentQuestionIndex,
-          totalQuestions: sortedQuestions.length,
-        });
-
-        // Give the browser time to set up its AudioContext before streaming audio
-        await new Promise((r) => setTimeout(r, 1_500));
-
-        // Trigger initial greeting ONLY on the very first question when starting fresh.
-        // If reconnecting/resuming on an existing question, wait silently for candidate speech.
-        if (currentQuestionIndex === 0) {
-          const firstQText = sortedQuestions[0]?.text || "";
-          const greeting = isZh
-            ? `受访者刚刚进入面试房间。请打个招呼开启面试："您好！感谢今天参加我们的技术面试。能听清我的声音吗？" 等候选人确认听清后，自然切入关于${ctx.title}的第一个技术主题并提出问题："${firstQText}"。切勿在提问前说"话筒交给你"或沉默等待。`
-            : `The candidate has just joined the interview. Open with this exact warm greeting: "Hey! Thanks for taking the time to interview today. Can you hear me loud and clear?" (Use the word "interview", NOT "chat"). Wait for their audio confirmation. Once they confirm, seamlessly introduce ${ctx.title} and ask the first question: "${firstQText}". DO NOT say "the floor is yours" or wait in silence before asking this question!`;
-          oaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "system",
-              content: [{ type: "input_text", text: `[SYSTEM] ${greeting}` }],
-            },
-          }));
-          requestAssistantResponse("initial greeting", { tool_choice: "none" });
-        } else {
-          log.info(`Resuming on Q${currentQuestionIndex + 1} — waiting silently for participant speech`);
-          startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
+        if (pendingQuestionPrompt) {
+          const prompt = pendingQuestionPrompt;
+          pendingQuestionPrompt = null;
+          if (pendingPromptTimer) { clearTimeout(pendingPromptTimer); pendingPromptTimer = null; }
+          sendQuestionPrompt(prompt);
         }
+        return;
       } catch (err) {
-        log.error("Failed to connect to OpenAI:", err);
-        send({
-          type: "error",
-          message: `OpenAI connection failed: ${err instanceof Error ? err.message : err}`,
-        });
-        browserWs.close();
+        log.warn(`Reconnect attempt ${attempt} failed:`, err);
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+
+    reconnecting = false;
+    throw new Error("All reconnect attempts failed");
+  }
+
+  // ── Initial connection ────────────────────────────────────────────
+
+  try {
+    oaiWs = await connectOai();
+    oaiSessionStart = Date.now();
+    log.info("OpenAI session established");
+    scheduleFiveMinuteWarning();
+    attachOaiHandlers(oaiWs);
+
+    send({ type: "ready", sessionId: "openai-session" });
+    send({
+      type: "question_change",
+      questionIndex: currentQuestionIndex,
+      totalQuestions: sortedQuestions.length,
+    });
+
+    // Give the browser time to set up its AudioContext before streaming audio
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    // Trigger initial greeting ONLY on the very first question when starting fresh.
+    // If reconnecting/resuming on an existing question, wait silently for candidate speech.
+    if (currentQuestionIndex === 0) {
+      const firstQText = sortedQuestions[0]?.text || "";
+      const greeting = isZh
+        ? `受访者刚刚进入面试房间。请打个招呼开启面试："您好！感谢今天参加我们的技术面试。能听清我的声音吗？" 等候选人确认听清后，自然切入关于${ctx.title}的第一个技术主题并提出问题："${firstQText}"。切勿在提问前说"话筒交给你"或沉默等待。`
+        : `The candidate has just joined the interview. Open with this exact warm greeting: "Hey! Thanks for taking the time to interview today. Can you hear me loud and clear?" (Use the word "interview", NOT "chat"). Wait for their audio confirmation. Once they confirm, seamlessly introduce ${ctx.title} and ask the first question: "${firstQText}". DO NOT say "the floor is yours" or wait in silence before asking this question!`;
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: `[SYSTEM] ${greeting}` }],
+        },
+      }));
+      requestAssistantResponse("initial greeting", { tool_choice: "none" });
+    } else {
+      log.info(`Resuming on Q${currentQuestionIndex + 1} — waiting silently for participant speech`);
+      startSilenceGapTimer(INITIAL_THINKING_SILENCE_MS);
+    }
+  } catch (err) {
+    log.error("Failed to connect to OpenAI:", err);
+    send({
+      type: "error",
+      message: `OpenAI connection failed: ${err instanceof Error ? err.message : err}`,
+    });
+    browserWs.close();
+    return;
+  }
+
+  // ── Handle Browser → OpenAI ───────────────────────────────────────
+
+  function requestTransition(
+    targetIdx: number,
+    directionLabel: string,
+    reason: "button" | "user_request" = "button",
+  ) {
+    clearPendingTransition();
+    clearQuestionPrompt();
+    clearSilenceGapTimer();
+    cancelOngoingResponse();
+
+    isTransitioning = true;
+    const direction = targetIdx > currentQuestionIndex ? "next" : "previous";
+    send({ type: "transitioning", direction });
+
+    setTimeout(() => {
+      if (targetIdx === currentQuestionIndex) {
+        isTransitioning = false;
+        return;
+      }
+      if (targetIdx >= sortedQuestions.length) {
+        isTransitioning = false;
+        if (!interviewDone) {
+          interviewDone = true;
+          pendingInterviewComplete = true;
+          log.info("Interview ending (wrap up) — dispatching farewell");
+          if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+            const farewellPrompt = isZh
+              ? `[SYSTEM] 候选人已完成面试或提出了结束/交卷请求。请以温暖、亲切的考官语气向候选人表达感谢并道别（例如：“感谢你今天的参与和精彩回答，今天的面试就到这里了，祝你一切顺利，再见！”），说出这句告别语即可。`
+              : `[SYSTEM] The candidate has finished or requested to wrap up the interview. Warmly thank them for their time and thoughtful answers, and deliver a natural, polite farewell (e.g., "Thank you so much for your time today! That wraps up our interview. Have a great day and best of luck!"). Deliver this spoken farewell now.`;
+            oaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{ type: "input_text", text: farewellPrompt }],
+                },
+              })
+            );
+            requestAssistantResponse("interview wrap-up farewell");
+          }
+          interviewCompleteTimer = setTimeout(() => {
+            if (pendingInterviewComplete) {
+              markInterviewComplete("timeout fallback");
+            }
+          }, 12_000);
+        }
+        return;
+      }
+      const dir = targetIdx > currentQuestionIndex ? "→" : "←";
+      currentQuestionIndex = targetIdx;
+      questionEnteredAt = Date.now();
+      userCommittedWordsThisQuestion = 0;
+      userSpokeThisTurn = false;
+      nudgeCountThisQuestion = 0;
+      clearSilenceGapTimer();
+      disableTools();
+      pushHistory("user", `[Moved to question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}"]`);
+      send({
+        type: "question_change",
+        questionIndex: currentQuestionIndex,
+        totalQuestions: sortedQuestions.length,
+      });
+      isTransitioning = false;
+      log.info(`${dir} Q${currentQuestionIndex + 1}/${sortedQuestions.length}`);
+
+      const prompt = reason === "user_request"
+        ? `[SYSTEM] The participant explicitly asked to go ${directionLabel.toLowerCase()}. We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly acknowledge the transition and introduce this question now.`
+        : `[SYSTEM] The participant clicked "${directionLabel}". We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly introduce this question now.`;
+      sendQuestionPrompt(prompt);
+    }, 500);
+  }
+
+  function tryHandleExplicitUserNavigation(text: string): boolean {
+    const userText = text.trim();
+    if (!userText || isTransitioning || interviewDone) return false;
+
+    if (isCandidateWrapUpRequest(userText)) {
+      log.info(`Fast-path WRAP-UP transition from user: "${userText}"`);
+      requestTransition(sortedQuestions.length, "End Interview", "user_request");
+      return true;
+    }
+
+    if (isFastPrevRequest(userText) || isUserPrevRequest(userText)) {
+      if (currentQuestionIndex <= 0) return false;
+      log.info(`Fast-path PREV transition from user: "${userText}"`);
+      requestTransition(currentQuestionIndex - 1, "Previous Question", "user_request");
+      return true;
+    }
+
+    if (isFastNextRequest(userText) || isUserSkipRequest(userText)) {
+      const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
+      if (nextIdx === currentQuestionIndex) return false;
+      log.info(`Fast-path NEXT transition from user: "${userText}"`);
+      requestTransition(nextIdx, "Next Question", "user_request");
+      return true;
+    }
+
+    return false;
+  }
+
+  browserWs.on("message", (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+
+      if (msg.type === "next_question") {
+        log.info("Browser requested next question");
+        const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
+        if (nextIdx !== currentQuestionIndex) {
+          requestTransition(nextIdx, "Next Question");
+        }
+        return;
+      }
+      if (msg.type === "prev_question") {
+        log.info("Browser requested previous question");
+        const prevIdx = Math.max(currentQuestionIndex - 1, 0);
+        if (prevIdx !== currentQuestionIndex) {
+          requestTransition(prevIdx, "Previous Question");
+        }
+        return;
+      }
+      if (msg.type === "ping") {
+        send({ type: "pong" });
         return;
       }
 
-      // ── Handle Browser → OpenAI ───────────────────────────────────────
-
-      function requestTransition(
-        targetIdx: number,
-        directionLabel: string,
-        reason: "button" | "user_request" = "button",
-      ) {
-        clearPendingTransition();
-        clearQuestionPrompt();
+      if (msg.type === "candidate_turn_done") {
+        const reason = (msg.reason as string) || "unknown";
+        const clientText = typeof msg.text === "string" ? msg.text.trim() : "";
+        log.info(`[relay] Received candidate_turn_done (reason: ${reason}, text: ${clientText ? JSON.stringify(clientText) : "none"})`);
+        const nowMs = Date.now();
+        if (userSpeechGateOpen) {
+          lastValidSpeechSegmentDuration = lastVoiceEnergyTime - userSpeechStartMs;
+          lastValidSpeechSegmentPeakRms = userSpeechPeakRmsThisSegment;
+          lastValidSpeechSegmentEndedAt = nowMs;
+          userSpeechGateOpen = false;
+          audioPreRoll = [];
+        }
         clearSilenceGapTimer();
-        cancelOngoingResponse();
 
-        isTransitioning = true;
-        const direction = targetIdx > currentQuestionIndex ? "next" : "previous";
-        send({ type: "transitioning", direction });
+        // 1. If verified client text was provided (e.g. from Chrome Web Speech API)
+        if (clientText) {
+          const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
+          let effectiveClientText = clientText;
+          if (isEchoWindow) {
+            const recentAssistant = [
+              outputTranscriptBuffer,
+              ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
+            ].filter(Boolean);
 
-        setTimeout(() => {
-          if (targetIdx === currentQuestionIndex) {
-            isTransitioning = false;
+            const echoCheck = stripAssistantEcho(clientText, recentAssistant);
+            if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
+              log.info(`Ignored candidate_turn_done clientText (full echo): ${JSON.stringify(clientText)}`);
+              return;
+            }
+            effectiveClientText = echoCheck.cleanedText;
+
+            if (isWhisperHallucination(effectiveClientText, ctx.language) || isEchoOfAssistant(effectiveClientText)) {
+              log.info(`Ignored candidate_turn_done clientText (hallucination or echo): ${JSON.stringify(effectiveClientText)}`);
+              return;
+            }
+          }
+
+          // Clear any pending audio buffer in OpenAI to avoid processing background noise
+          if (oaiWs?.readyState === WebSocket.OPEN) {
+            try {
+              oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            } catch {
+              // ignore
+            }
+          }
+
+          lastUserInput = Date.now();
+          queuedAssistantResponse = null;
+          userSpokeThisTurn = true;
+          speechTranscriptCommitted = true;
+          lastCommittedUserTranscript = effectiveClientText;
+          lastCommittedUserTranscriptAt = Date.now();
+          pushHistory("user", effectiveClientText);
+          armStaleAsrGuard(effectiveClientText);
+          lastValidSpeechSegmentDuration = 0;
+          lastValidSpeechSegmentPeakRms = 0;
+          lastValidSpeechSegmentEndedAt = 0;
+
+          // Broadcast final ASR to client so transcript & state are synchronized
+          send({ type: "asr_ended", text: effectiveClientText });
+
+          if (tryHandleExplicitUserNavigation(effectiveClientText)) {
             return;
           }
-          if (targetIdx >= sortedQuestions.length) {
-            isTransitioning = false;
-            if (!interviewDone) {
-              interviewDone = true;
-              pendingInterviewComplete = true;
-              log.info("Interview ending (wrap up) — dispatching farewell");
-              if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
-                const farewellPrompt = isZh
-                  ? `[SYSTEM] 候选人已完成面试或提出了结束/交卷请求。请以温暖、亲切的考官语气向候选人表达感谢并道别（例如：“感谢你今天的参与和精彩回答，今天的面试就到这里了，祝你一切顺利，再见！”），说出这句告别语即可。`
-                  : `[SYSTEM] The candidate has finished or requested to wrap up the interview. Warmly thank them for their time and thoughtful answers, and deliver a natural, polite farewell (e.g., "Thank you so much for your time today! That wraps up our interview. Have a great day and best of luck!"). Deliver this spoken farewell now.`;
-                oaiWs.send(
-                  JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system",
-                      content: [{ type: "input_text", text: farewellPrompt }],
-                    },
-                  })
-                );
-                requestAssistantResponse("interview wrap-up farewell");
-              }
-              interviewCompleteTimer = setTimeout(() => {
-                if (pendingInterviewComplete) {
-                  markInterviewComplete("timeout fallback");
-                }
-              }, 12_000);
+
+          if (isRepeatOrClarificationRequest(effectiveClientText)) {
+            log.info(`Candidate requested question repeat/clarification: "${effectiveClientText}"`);
+            if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+              oaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: isZh
+                      ? `[SYSTEM] 候选人刚才请求重复刚才的问题（"${effectiveClientText}"）。请以温和清晰的口吻重新阐述或举例说明你刚才提出的问题或探讨点。切勿跳回开场白或第一题。`
+                      : `[SYSTEM] The candidate asked you to repeat or clarify what you just asked ("${effectiveClientText}"). Warmly and clearly repeat or rephrase the question or topic you just asked about in simple terms. Do NOT revert back to question 1 or previous introductory topics.`,
+                  }],
+                },
+              }));
+              requestAssistantResponse("candidate requested question repetition");
             }
             return;
           }
-          const dir = targetIdx > currentQuestionIndex ? "→" : "←";
-          currentQuestionIndex = targetIdx;
-          questionEnteredAt = Date.now();
-          userCommittedWordsThisQuestion = 0;
+
+          if (oaiWs?.readyState === WebSocket.OPEN) {
+            cancelOngoingResponse();
+            if (!firstQuestionAsked) {
+              firstQuestionAsked = true;
+              const firstQText = sortedQuestions[0]?.text || "";
+              oaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: isZh
+                      ? `[SYSTEM] 候选人已回应（"${effectiveClientText}"）。绝对不要重复问候，也不要再次询问能否听清！请热情确认对方声音清晰（如："太好了，声音非常清晰！"），并立即正式介绍${ctx.title}并提出第一道题目："${firstQText}"。切勿在提问前说"话筒交给你"或沉默等待。`
+                      : `[SYSTEM] The candidate has responded ("${effectiveClientText}"). CRITICAL: DO NOT repeat the opening greeting and DO NOT ask "can you hear me" again! Confirm enthusiastically that you can hear them (e.g., "Awesome, loud and clear!"), seamlessly introduce ${ctx.title}, and immediately ask Question 1: "${firstQText}". DO NOT say "the floor is yours" before asking the question!`,
+                  }],
+                },
+              }));
+            }
+            oaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: effectiveClientText }],
+              },
+            }));
+            requestAssistantResponse(`candidate turn (${reason})`);
+          }
+          return;
+        }
+
+        // 2. Fallback: if server ASR has uncommitted text
+        if (!speechTranscriptCommitted && bestAvailableTranscript()) {
+          log.info("candidate_turn_done: committing pending user transcript");
+          finalizeUserTurn("candidate_turn_done", true);
+          return;
+        }
+
+        // 3. Candidate muted without clientText.
+        // ONLY trigger an AI response if the user actually spoke substantive words during this question!
+        // Never trigger an AI turn if the candidate simply muted their mic while silent or listening!
+        if (!responseInFlight && !modelIsSpeaking && userSpokeThisTurn && userCommittedWordsThisQuestion >= 3) {
           userSpokeThisTurn = false;
-          nudgeCountThisQuestion = 0;
-          clearSilenceGapTimer();
-          disableTools();
-          pushHistory("user", `[Moved to question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}"]`);
-          send({
-            type: "question_change",
-            questionIndex: currentQuestionIndex,
-            totalQuestions: sortedQuestions.length,
-          });
-          isTransitioning = false;
-          log.info(`${dir} Q${currentQuestionIndex + 1}/${sortedQuestions.length}`);
-
-          const prompt = reason === "user_request"
-            ? `[SYSTEM] The participant explicitly asked to go ${directionLabel.toLowerCase()}. We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly acknowledge the transition and introduce this question now.`
-            : `[SYSTEM] The participant clicked "${directionLabel}". We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly introduce this question now.`;
-          sendQuestionPrompt(prompt);
-        }, 500);
+          if (oaiWs?.readyState === WebSocket.OPEN) {
+            oaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: isZh
+                        ? `[SYSTEM] 受访者已作答完毕并静音。请简短回应并自然提出跟进问题，或在讨论充分后调用 signal_question_change 切换到下一题。注意：绝不要替受访者讲解或给出标准答案。`
+                        : `[SYSTEM] The participant has finished answering and muted. Respond briefly (1-2 sentences) and either ask a concise follow-up or transition to the next theme via signal_question_change. CRITICAL: Maintain your role as the interviewer. NEVER explain the concept, solve the question, or provide the answer yourself.`,
+                    },
+                  ],
+                },
+              })
+            );
+            requestAssistantResponse("candidate_turn_done");
+          }
+        } else {
+          log.info(`candidate_turn_done (${reason}): candidate muted without speaking substantive answer — remaining silent`);
+        }
+        return;
       }
 
-      function tryHandleExplicitUserNavigation(text: string): boolean {
-        const userText = text.trim();
-        if (!userText || isTransitioning || interviewDone) return false;
+      if (msg.type === "code_execution_result") {
+        log.info(`[relay] Received code_execution_result (success: ${msg.success}, duration: ${msg.executionTimeMs}ms)`);
+        latestCode = (msg.code as string) || latestCode;
+        latestCodeLanguage = (msg.language as string) || latestCodeLanguage;
+        if (oaiWs?.readyState === WebSocket.OPEN) {
+          const logsText = Array.isArray(msg.logs) && msg.logs.length > 0
+            ? msg.logs.join("\n")
+            : "(No console logs)";
+          const outputText = msg.error
+            ? `Runtime Error:\n${msg.error}`
+            : `Execution Output / Return Value:\n${msg.resultFormatted || "(undefined)"}`;
 
-        if (isCandidateWrapUpRequest(userText)) {
-          log.info(`Fast-path WRAP-UP transition from user: "${userText}"`);
-          requestTransition(sortedQuestions.length, "End Interview", "user_request");
-          return true;
-        }
-
-        if (isFastPrevRequest(userText) || isUserPrevRequest(userText)) {
-          if (currentQuestionIndex <= 0) return false;
-          log.info(`Fast-path PREV transition from user: "${userText}"`);
-          requestTransition(currentQuestionIndex - 1, "Previous Question", "user_request");
-          return true;
-        }
-
-        if (isFastNextRequest(userText) || isUserSkipRequest(userText)) {
-          const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
-          if (nextIdx === currentQuestionIndex) return false;
-          log.info(`Fast-path NEXT transition from user: "${userText}"`);
-          requestTransition(nextIdx, "Next Question", "user_request");
-          return true;
-        }
-
-        return false;
-      }
-
-      browserWs.on("message", (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-
-          if (msg.type === "next_question") {
-            log.info("Browser requested next question");
-            const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
-            if (nextIdx !== currentQuestionIndex) {
-              requestTransition(nextIdx, "Next Question");
-            }
-            return;
-          }
-          if (msg.type === "prev_question") {
-            log.info("Browser requested previous question");
-            const prevIdx = Math.max(currentQuestionIndex - 1, 0);
-            if (prevIdx !== currentQuestionIndex) {
-              requestTransition(prevIdx, "Previous Question");
-            }
-            return;
-          }
-          if (msg.type === "ping") {
-            send({ type: "pong" });
-            return;
-          }
-
-          if (msg.type === "candidate_turn_done") {
-            const reason = (msg.reason as string) || "unknown";
-            const clientText = typeof msg.text === "string" ? msg.text.trim() : "";
-            log.info(`[relay] Received candidate_turn_done (reason: ${reason}, text: ${clientText ? JSON.stringify(clientText) : "none"})`);
-            const nowMs = Date.now();
-            if (userSpeechGateOpen) {
-              lastValidSpeechSegmentDuration = lastVoiceEnergyTime - userSpeechStartMs;
-              lastValidSpeechSegmentPeakRms = userSpeechPeakRmsThisSegment;
-              lastValidSpeechSegmentEndedAt = nowMs;
-              userSpeechGateOpen = false;
-              audioPreRoll = [];
-            }
-            clearSilenceGapTimer();
-
-            // 1. If verified client text was provided (e.g. from Chrome Web Speech API)
-            if (clientText) {
-              const isEchoWindow = modelIsSpeaking || (Date.now() - lastAssistantAudioEndedAt < 2500);
-              let effectiveClientText = clientText;
-              if (isEchoWindow) {
-                const recentAssistant = [
-                  outputTranscriptBuffer,
-                  ...conversationHistory.slice(-2).filter((m) => m.role === "assistant").map((m) => m.text),
-                ].filter(Boolean);
-
-                const echoCheck = stripAssistantEcho(clientText, recentAssistant);
-                if (echoCheck.isFullEcho || !echoCheck.cleanedText) {
-                  log.info(`Ignored candidate_turn_done clientText (full echo): ${JSON.stringify(clientText)}`);
-                  return;
-                }
-                effectiveClientText = echoCheck.cleanedText;
-
-                if (isWhisperHallucination(effectiveClientText, ctx.language) || isEchoOfAssistant(effectiveClientText)) {
-                  log.info(`Ignored candidate_turn_done clientText (hallucination or echo): ${JSON.stringify(effectiveClientText)}`);
-                  return;
-                }
-              }
-
-              // Clear any pending audio buffer in OpenAI to avoid processing background noise
-              if (oaiWs?.readyState === WebSocket.OPEN) {
-                try {
-                  oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                } catch {
-                  // ignore
-                }
-              }
-
-              lastUserInput = Date.now();
-              queuedAssistantResponse = null;
-              userSpokeThisTurn = true;
-              speechTranscriptCommitted = true;
-              lastCommittedUserTranscript = effectiveClientText;
-              lastCommittedUserTranscriptAt = Date.now();
-              pushHistory("user", effectiveClientText);
-              armStaleAsrGuard(effectiveClientText);
-              lastValidSpeechSegmentDuration = 0;
-              lastValidSpeechSegmentPeakRms = 0;
-              lastValidSpeechSegmentEndedAt = 0;
-
-              // Broadcast final ASR to client so transcript & state are synchronized
-              send({ type: "asr_ended", text: effectiveClientText });
-
-              if (tryHandleExplicitUserNavigation(effectiveClientText)) {
-                return;
-              }
-
-              if (isRepeatOrClarificationRequest(effectiveClientText)) {
-                log.info(`Candidate requested question repeat/clarification: "${effectiveClientText}"`);
-                if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
-                  oaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system",
-                      content: [{
-                        type: "input_text",
-                        text: isZh
-                          ? `[SYSTEM] 候选人刚才请求重复刚才的问题（"${effectiveClientText}"）。请以温和清晰的口吻重新阐述或举例说明你刚才提出的问题或探讨点。切勿跳回开场白或第一题。`
-                          : `[SYSTEM] The candidate asked you to repeat or clarify what you just asked ("${effectiveClientText}"). Warmly and clearly repeat or rephrase the question or topic you just asked about in simple terms. Do NOT revert back to question 1 or previous introductory topics.`,
-                      }],
-                    },
-                  }));
-                  requestAssistantResponse("candidate requested question repetition");
-                }
-                return;
-              }
-
-              if (oaiWs?.readyState === WebSocket.OPEN) {
-                cancelOngoingResponse();
-                if (!firstQuestionAsked) {
-                  firstQuestionAsked = true;
-                  const firstQText = sortedQuestions[0]?.text || "";
-                  oaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system",
-                      content: [{
-                        type: "input_text",
-                        text: isZh
-                          ? `[SYSTEM] 候选人已回应（"${effectiveClientText}"）。绝对不要重复问候，也不要再次询问能否听清！请热情确认对方声音清晰（如："太好了，声音非常清晰！"），并立即正式介绍${ctx.title}并提出第一道题目："${firstQText}"。切勿在提问前说"话筒交给你"或沉默等待。`
-                          : `[SYSTEM] The candidate has responded ("${effectiveClientText}"). CRITICAL: DO NOT repeat the opening greeting and DO NOT ask "can you hear me" again! Confirm enthusiastically that you can hear them (e.g., "Awesome, loud and clear!"), seamlessly introduce ${ctx.title}, and immediately ask Question 1: "${firstQText}". DO NOT say "the floor is yours" before asking the question!`,
-                      }],
-                    },
-                  }));
-                }
-                oaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{ type: "input_text", text: effectiveClientText }],
-                  },
-                }));
-                requestAssistantResponse(`candidate turn (${reason})`);
-              }
-              return;
-            }
-
-            // 2. Fallback: if server ASR has uncommitted text
-            if (!speechTranscriptCommitted && bestAvailableTranscript()) {
-              log.info("candidate_turn_done: committing pending user transcript");
-              finalizeUserTurn("candidate_turn_done", true);
-              return;
-            }
-
-            // 3. Candidate muted without clientText.
-            // ONLY trigger an AI response if the user actually spoke substantive words during this question!
-            // Never trigger an AI turn if the candidate simply muted their mic while silent or listening!
-            if (!responseInFlight && !modelIsSpeaking && userSpokeThisTurn && userCommittedWordsThisQuestion >= 3) {
-              userSpokeThisTurn = false;
-              if (oaiWs?.readyState === WebSocket.OPEN) {
-                oaiWs.send(
-                  JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system",
-                      content: [
-                        {
-                          type: "input_text",
-                          text: isZh
-                            ? `[SYSTEM] 受访者已作答完毕并静音。请简短回应并自然提出跟进问题，或在讨论充分后调用 signal_question_change 切换到下一题。注意：绝不要替受访者讲解或给出标准答案。`
-                            : `[SYSTEM] The participant has finished answering and muted. Respond briefly (1-2 sentences) and either ask a concise follow-up or transition to the next theme via signal_question_change. CRITICAL: Maintain your role as the interviewer. NEVER explain the concept, solve the question, or provide the answer yourself.`,
-                        },
-                      ],
-                    },
-                  })
-                );
-                requestAssistantResponse("candidate_turn_done");
-              }
-            } else {
-              log.info(`candidate_turn_done (${reason}): candidate muted without speaking substantive answer — remaining silent`);
-            }
-            return;
-          }
-
-          if (msg.type === "code_execution_result") {
-            log.info(`[relay] Received code_execution_result (success: ${msg.success}, duration: ${msg.executionTimeMs}ms)`);
-            latestCode = (msg.code as string) || latestCode;
-            latestCodeLanguage = (msg.language as string) || latestCodeLanguage;
-            if (oaiWs?.readyState === WebSocket.OPEN) {
-              const logsText = Array.isArray(msg.logs) && msg.logs.length > 0
-                ? msg.logs.join("\n")
-                : "(No console logs)";
-              const outputText = msg.error
-                ? `Runtime Error:\n${msg.error}`
-                : `Execution Output / Return Value:\n${msg.resultFormatted || "(undefined)"}`;
-
-              const codeExecutionReport = `[CODE_EXECUTION_RESULT] The participant just executed their code in the browser (${msg.language || "javascript"}).
+          const codeExecutionReport = `[CODE_EXECUTION_RESULT] The participant just executed their code in the browser (${msg.language || "javascript"}).
 Execution Status: ${msg.success ? "SUCCESS" : "ERROR"} (${msg.executionTimeMs || 0}ms)
 
 Code:
@@ -3182,343 +3182,343 @@ Conduct a realistic oral code review:
 4. Once satisfied, smoothly transition to the next question using signal_question_change.
 Remember: Keep it conversational and concise (1-2 sentences). Do NOT read back raw stack traces.`;
 
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{
-                    type: "input_text",
-                    text: codeExecutionReport,
-                  }],
-                },
-              }));
-              requestAssistantResponse("code_execution_result");
-            }
-            return;
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{
+                type: "input_text",
+                text: codeExecutionReport,
+              }],
+            },
+          }));
+          requestAssistantResponse("code_execution_result");
+        }
+        return;
+      }
+
+      if (reconnecting) return;
+      if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+
+      if (msg.type === "audio" && msg.data) {
+        if (isTransitioning) return;
+        const rawPcm = Buffer.from(msg.data, "hex");
+        const is24k = msg.sampleRate === 24000;
+        const pcm24k = is24k ? rawPcm : resample16to24(rawPcm);
+        const nowMs = Date.now();
+
+        let sumSq = 0;
+        const sampleCount = Math.floor(rawPcm.length / 2);
+        for (let i = 0; i < sampleCount; i++) {
+          const val = rawPcm.readInt16LE(i * 2);
+          sumSq += val * val;
+        }
+        const rms = Math.sqrt(sumSq / (sampleCount || 1));
+
+        const inEchoCooldown = (nowMs - lastTtsAudioTime) < TTS_ECHO_COOLDOWN_MS || nowMs < ttsPlaybackEndsAt;
+
+        const bargeInFrameEligible =
+          inEchoCooldown &&
+          (modelIsSpeaking
+            ? responseAudioStarted &&
+            responseAudioStartedAt > 0 &&
+            nowMs - responseAudioStartedAt >= DEFAULT_TTS_BARGE_IN_MIN_AUDIO_MS &&
+            responseTtsBytes >= DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES
+            : true) &&
+          rms >= TTS_BARGE_IN_RMS;
+        if (bargeInFrameEligible) {
+          ttsBargeInFrames += 1;
+        } else {
+          ttsBargeInFrames = 0;
+        }
+        const allowBargeInDuringTts = shouldAllowTtsBargeIn({
+          inEchoCooldown,
+          modelIsSpeaking,
+          responseAudioStarted,
+          ttsAudioStartedAt: responseAudioStartedAt,
+          nowMs,
+          responseTtsBytes,
+          rms,
+          thresholdRms: TTS_BARGE_IN_RMS,
+          consecutiveFrames: ttsBargeInFrames,
+          thresholdFrames: TTS_BARGE_IN_FRAME_COUNT,
+        });
+
+        if (allowBargeInDuringTts) {
+          log.info(`Allowing TTS barge-in after sustained speech (rms=${Math.round(rms)})`);
+          ttsBargeInFrames = 0;
+          ttsPlaybackEndsAt = 0;
+          lastTtsAudioTime = 0;
+          cancelOngoingResponse();
+          send({ type: "interrupt" });
+        }
+
+        const canForwardAudio = !inEchoCooldown || allowBargeInDuringTts;
+
+        if (canForwardAudio) {
+          if (!userSpeechGateOpen) {
+            // Adapt ambient noise floor with an exponential moving average
+            ambientNoiseFloorRms = Math.min(300, Math.max(40, ambientNoiseFloorRms * 0.98 + rms * 0.02));
           }
 
-          if (reconnecting) return;
-          if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
+          const SPEECH_GATE_OPEN_RMS = Math.max(120, Math.round(ambientNoiseFloorRms * 1.5));
+          const SPEECH_GATE_HOLD_RMS = Math.max(70, Math.round(ambientNoiseFloorRms * 1.1));
+          const SPEECH_HANGOVER_MS = 800;
+          const MAX_PRE_ROLL = 6;
 
-          if (msg.type === "audio" && msg.data) {
-            if (isTransitioning) return;
-            const rawPcm = Buffer.from(msg.data, "hex");
-            const is24k = msg.sampleRate === 24000;
-            const pcm24k = is24k ? rawPcm : resample16to24(rawPcm);
-            const nowMs = Date.now();
+          if (rms >= SPEECH_GATE_OPEN_RMS) {
+            lastVoiceEnergyTime = nowMs;
+            if (!userSpeechGateOpen) {
+              userSpeechGateOpen = true;
+              userSpeechStartMs = nowMs;
+              userSpeechPeakRmsThisSegment = rms;
+              clearSpeechFinalizeTimer();
 
-            let sumSq = 0;
-            const sampleCount = Math.floor(rawPcm.length / 2);
-            for (let i = 0; i < sampleCount; i++) {
-              const val = rawPcm.readInt16LE(i * 2);
-              sumSq += val * val;
-            }
-            const rms = Math.sqrt(sumSq / (sampleCount || 1));
-
-            const inEchoCooldown = (nowMs - lastTtsAudioTime) < TTS_ECHO_COOLDOWN_MS || nowMs < ttsPlaybackEndsAt;
-
-            const bargeInFrameEligible =
-              inEchoCooldown &&
-              (modelIsSpeaking
-                ? responseAudioStarted &&
-                  responseAudioStartedAt > 0 &&
-                  nowMs - responseAudioStartedAt >= DEFAULT_TTS_BARGE_IN_MIN_AUDIO_MS &&
-                  responseTtsBytes >= DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES
-                : true) &&
-              rms >= TTS_BARGE_IN_RMS;
-            if (bargeInFrameEligible) {
-              ttsBargeInFrames += 1;
-            } else {
-              ttsBargeInFrames = 0;
-            }
-            const allowBargeInDuringTts = shouldAllowTtsBargeIn({
-              inEchoCooldown,
-              modelIsSpeaking,
-              responseAudioStarted,
-              ttsAudioStartedAt: responseAudioStartedAt,
-              nowMs,
-              responseTtsBytes,
-              rms,
-              thresholdRms: TTS_BARGE_IN_RMS,
-              consecutiveFrames: ttsBargeInFrames,
-              thresholdFrames: TTS_BARGE_IN_FRAME_COUNT,
-            });
-
-            if (allowBargeInDuringTts) {
-              log.info(`Allowing TTS barge-in after sustained speech (rms=${Math.round(rms)})`);
-              ttsBargeInFrames = 0;
-              ttsPlaybackEndsAt = 0;
-              lastTtsAudioTime = 0;
-              cancelOngoingResponse();
-              send({ type: "interrupt" });
-            }
-
-            const canForwardAudio = !inEchoCooldown || allowBargeInDuringTts;
-
-            if (canForwardAudio) {
-              if (!userSpeechGateOpen) {
-                // Adapt ambient noise floor with an exponential moving average
-                ambientNoiseFloorRms = Math.min(300, Math.max(40, ambientNoiseFloorRms * 0.98 + rms * 0.02));
+              // Flush pre-roll buffer so the leading consonant/syllable is never lost
+              if (audioPreRoll.length > 0) {
+                for (const chunk of audioPreRoll) {
+                  oaiWs.send(JSON.stringify({
+                    type: "input_audio_buffer.append",
+                    audio: chunk.toString("base64"),
+                  }));
+                }
+                audioPreRoll = [];
               }
+            }
+          }
 
-              const SPEECH_GATE_OPEN_RMS = Math.max(120, Math.round(ambientNoiseFloorRms * 1.5));
-              const SPEECH_GATE_HOLD_RMS = Math.max(70, Math.round(ambientNoiseFloorRms * 1.1));
-              const SPEECH_HANGOVER_MS = 800;
-              const MAX_PRE_ROLL = 6;
+          if (userSpeechGateOpen) {
+            userSpeechPeakRmsThisSegment = Math.max(userSpeechPeakRmsThisSegment, rms);
+            if (rms >= SPEECH_GATE_HOLD_RMS) {
+              lastVoiceEnergyTime = nowMs;
+            }
 
-              if (rms >= SPEECH_GATE_OPEN_RMS) {
-                lastVoiceEnergyTime = nowMs;
-                if (!userSpeechGateOpen) {
-                  userSpeechGateOpen = true;
-                  userSpeechStartMs = nowMs;
-                  userSpeechPeakRmsThisSegment = rms;
-                  clearSpeechFinalizeTimer();
+            // Track user activity when vocal energy is sustained, without cancelling quiet thinking check-in timers
+            if (userSpeechPeakRmsThisSegment >= 120 && nowMs - userSpeechStartMs >= 150) {
+              lastUserInput = nowMs;
+            }
 
-                  // Flush pre-roll buffer so the leading consonant/syllable is never lost
-                  if (audioPreRoll.length > 0) {
-                    for (const chunk of audioPreRoll) {
-                      oaiWs.send(JSON.stringify({
-                        type: "input_audio_buffer.append",
-                        audio: chunk.toString("base64"),
-                      }));
-                    }
-                    audioPreRoll = [];
-                  }
-                }
-              }
+            lastAudioSentToOai = Date.now();
+            oaiWs.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: pcm24k.toString("base64"),
+            }));
+            sendAudioToVolc(rawPcm);
 
-              if (userSpeechGateOpen) {
-                userSpeechPeakRmsThisSegment = Math.max(userSpeechPeakRmsThisSegment, rms);
-                if (rms >= SPEECH_GATE_HOLD_RMS) {
-                  lastVoiceEnergyTime = nowMs;
-                }
+            // Close gate after silence
+            const shouldCloseHangover = nowMs - lastVoiceEnergyTime >= SPEECH_HANGOVER_MS;
+            if (shouldCloseHangover) {
+              userSpeechGateOpen = false;
+              const segDuration = nowMs - userSpeechStartMs;
+              lastVoiceEnergyTime = 0;
 
-                // Track user activity when vocal energy is sustained, without cancelling quiet thinking check-in timers
-                if (userSpeechPeakRmsThisSegment >= 120 && nowMs - userSpeechStartMs >= 150) {
-                  lastUserInput = nowMs;
-                }
-
-                lastAudioSentToOai = Date.now();
-                oaiWs.send(JSON.stringify({
-                  type: "input_audio_buffer.append",
-                  audio: pcm24k.toString("base64"),
-                }));
-                sendAudioToVolc(rawPcm);
-
-                // Close gate after silence
-                const shouldCloseHangover = nowMs - lastVoiceEnergyTime >= SPEECH_HANGOVER_MS;
-                if (shouldCloseHangover) {
-                  userSpeechGateOpen = false;
-                  const segDuration = nowMs - userSpeechStartMs;
-                  lastVoiceEnergyTime = 0;
-
-                  // Only clear OpenAI buffer on micro-spikes (< 80ms and < 100 RMS)
-                  if (segDuration < 80 && userSpeechPeakRmsThisSegment < 100) {
-                    log.debug(`Cleared OpenAI audio buffer after micro click (peak=${Math.round(userSpeechPeakRmsThisSegment)}, dur=${segDuration}ms)`);
-                    oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                    userSpeechPeakRmsThisSegment = 0;
-                    audioPreRoll = [];
-                  } else {
-                    lastValidSpeechSegmentDuration = segDuration;
-                    lastValidSpeechSegmentPeakRms = userSpeechPeakRmsThisSegment;
-                    lastValidSpeechSegmentEndedAt = nowMs;
-                    userSpeechPeakRmsThisSegment = 0;
-                    audioPreRoll = [];
-                  }
-
-                  // Ensure silence gap timer is active if candidate has not committed an answer yet
-                  if (!userSpokeThisTurn && !speechTranscriptCommitted && !modelIsSpeaking && !responseInFlight && !silenceGapTimer) {
-                    const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
-                    const thinkingSilenceDelayMs = remainingPlaybackMs + INITIAL_THINKING_SILENCE_MS;
-                    startSilenceGapTimer(thinkingSilenceDelayMs);
-                  }
-
-                  // Deliver queued proctor alert if candidate stopped speaking
-                  if (pendingProctorAlert && !modelIsSpeaking && !responseInFlight && Date.now() - pendingProctorAlert.at < 20_000) {
-                    deliverProctorDisruption(pendingProctorAlert.alertType, pendingProctorAlert.detail);
-                  }
-                }
+              // Only clear OpenAI buffer on micro-spikes (< 80ms and < 100 RMS)
+              if (segDuration < 80 && userSpeechPeakRmsThisSegment < 100) {
+                log.debug(`Cleared OpenAI audio buffer after micro click (peak=${Math.round(userSpeechPeakRmsThisSegment)}, dur=${segDuration}ms)`);
+                oaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                userSpeechPeakRmsThisSegment = 0;
+                audioPreRoll = [];
               } else {
-                // Buffer pre-roll audio while silent; do NOT send pure silence to OpenAI!
-                audioPreRoll.push(pcm24k);
-                if (audioPreRoll.length > MAX_PRE_ROLL) {
-                  audioPreRoll.shift();
-                }
-              }
-            } else {
-              if (userSpeechGateOpen) {
-                lastValidSpeechSegmentDuration = lastVoiceEnergyTime - userSpeechStartMs;
+                lastValidSpeechSegmentDuration = segDuration;
                 lastValidSpeechSegmentPeakRms = userSpeechPeakRmsThisSegment;
                 lastValidSpeechSegmentEndedAt = nowMs;
                 userSpeechPeakRmsThisSegment = 0;
+                audioPreRoll = [];
               }
-              userSpeechGateOpen = false;
-              audioPreRoll = [];
-            }
-          } else if (msg.type === "text_input" && msg.content) {
-            const text = (msg.content as string).trim();
-            if (text) {
-              lastUserInput = Date.now();
-              queuedAssistantResponse = null;
-              pushHistory("user", text);
-              if (tryHandleExplicitUserNavigation(text)) {
-                return;
+
+              // Ensure silence gap timer is active if candidate has not committed an answer yet
+              if (!userSpokeThisTurn && !speechTranscriptCommitted && !modelIsSpeaking && !responseInFlight && !silenceGapTimer) {
+                const remainingPlaybackMs = Math.max(0, ttsPlaybackEndsAt - Date.now());
+                const thinkingSilenceDelayMs = remainingPlaybackMs + INITIAL_THINKING_SILENCE_MS;
+                startSilenceGapTimer(thinkingSilenceDelayMs);
               }
-              send({ type: "interrupt" });
-              // Cancel any ongoing response, send text as user message, trigger new response
-              cancelOngoingResponse();
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text }],
-                },
-              }));
-              requestAssistantResponse("text input");
-            }
-          } else if (msg.type === "code_update") {
-            const content = (msg.content as string) || "";
-            const language = (msg.language as string) || "plaintext";
-            latestCode = content;
-            latestCodeLanguage = language;
-            lastCodeEditedAt = Date.now();
-            if (content) {
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{
-                    type: "input_text", text:
-                      `[CODE_UPDATE] The participant's current code (${language}):\n\`\`\`${language}\n${content}\n\`\`\``,
-                  }],
-                },
-              }));
-              // Acknowledge silently so it doesn't trigger a response
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "assistant",
-                  content: [{ type: "output_text", text: "(Noted code update. I will conduct an oral code defense on the implementation.)" }],
-                },
-              }));
-            }
-          } else if (msg.type === "text" && msg.content) {
-            oaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "system",
-                content: [{ type: "input_text", text: `[SYSTEM] Please say the following aloud: ${msg.content}` }],
-              },
-            }));
-            requestAssistantResponse("system say-aloud");
-          } else if (msg.type === "whiteboard_update") {
-            const imageDataUrl = (msg.imageDataUrl as string) || "";
-            if (imageDataUrl) {
-              // Send as an image in a user message
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{
-                    type: "input_image",
-                    image_url: imageDataUrl,
-                  }],
-                },
-              }));
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "assistant",
-                  content: [{ type: "output_text", text: "(Received whiteboard update.)" }],
-                },
-              }));
-              log.info("Whiteboard image sent to OpenAI");
-            }
-          } else if (msg.type === "proctor_alert") {
-            const alertType = (msg.alertType as string) || "";
-            const detail = (msg.detail as string) || "";
-            log.info(`[proctor] Anti-cheating event received: ${alertType} (${detail})`);
 
-            const isCriticalAlert =
-              alertType === "face_missing" ||
-              alertType === "multiple_faces" ||
-              alertType === "face_mismatch" ||
-              alertType === "page_departure";
-
-            // For critical integrity alerts (face missing, multiple faces, face mismatch, page departure),
-            // immediately disrupt and smoothly warn the candidate without delay, even mid-speech.
-            if (!isCriticalAlert) {
-              const now = Date.now();
-              const isActivelySpeaking = userSpeechGateOpen && (now - lastVoiceEnergyTime < 800) && userSpeechPeakRmsThisSegment >= 400;
-              if (isActivelySpeaking) {
-                log.info(`[proctor] Queued pending spoken disruption for ${alertType} (candidate is actively speaking)`);
-                pendingProctorAlert = { alertType, detail, at: now };
-                return;
+              // Deliver queued proctor alert if candidate stopped speaking
+              if (pendingProctorAlert && !modelIsSpeaking && !responseInFlight && Date.now() - pendingProctorAlert.at < 20_000) {
+                deliverProctorDisruption(pendingProctorAlert.alertType, pendingProctorAlert.detail);
               }
             }
-
-            deliverProctorDisruption(alertType, detail);
-          } else if (msg.type === "time_expired") {
-            log.info("Interview time limit reached — triggering graceful spoken farewell");
-            cancelOngoingResponse();
-            interviewDone = true;
-            pendingInterviewComplete = true;
-
-            const farewellText = isZh
-              ? "抱歉打扰一下，本次面试的规定时间已经到了，我们今天的交流就到这里。非常感谢您今天的参与和详尽回答！招聘团队会尽快复核面试记录并与您联系后续事宜。祝您生活愉快，再见！"
-              : "Excuse me, I see our allotted time for this interview has reached its limit, so we will wrap things up here. Thank you so much for your time and thoughtful responses today! The recruiting team will review your session and be in touch soon. Have a wonderful day!";
-
-            if (oaiWs?.readyState === WebSocket.OPEN) {
-              oaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[SYSTEM INSTRUCTION - TIME LIMIT EXPIRED]: The interview time limit has just expired. Deliver this spoken farewell to the candidate word for word right now, and do NOT ask any further questions:\n"${farewellText}"`,
-                  }],
-                },
-              }));
-              requestAssistantResponse("time expired farewell");
-
-              interviewCompleteTimer = setTimeout(() => {
-                if (pendingInterviewComplete) {
-                  markInterviewComplete("timeout farewell fallback");
-                }
-              }, 12_000);
-            } else {
-              markInterviewComplete("relay already closed");
+          } else {
+            // Buffer pre-roll audio while silent; do NOT send pure silence to OpenAI!
+            audioPreRoll.push(pcm24k);
+            if (audioPreRoll.length > MAX_PRE_ROLL) {
+              audioPreRoll.shift();
             }
           }
-        } catch (err) {
-          log.error("Error handling browser message:", err);
+        } else {
+          if (userSpeechGateOpen) {
+            lastValidSpeechSegmentDuration = lastVoiceEnergyTime - userSpeechStartMs;
+            lastValidSpeechSegmentPeakRms = userSpeechPeakRmsThisSegment;
+            lastValidSpeechSegmentEndedAt = nowMs;
+            userSpeechPeakRmsThisSegment = 0;
+          }
+          userSpeechGateOpen = false;
+          audioPreRoll = [];
         }
-      });
+      } else if (msg.type === "text_input" && msg.content) {
+        const text = (msg.content as string).trim();
+        if (text) {
+          lastUserInput = Date.now();
+          queuedAssistantResponse = null;
+          pushHistory("user", text);
+          if (tryHandleExplicitUserNavigation(text)) {
+            return;
+          }
+          send({ type: "interrupt" });
+          // Cancel any ongoing response, send text as user message, trigger new response
+          cancelOngoingResponse();
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text }],
+            },
+          }));
+          requestAssistantResponse("text input");
+        }
+      } else if (msg.type === "code_update") {
+        const content = (msg.content as string) || "";
+        const language = (msg.language as string) || "plaintext";
+        latestCode = content;
+        latestCodeLanguage = language;
+        lastCodeEditedAt = Date.now();
+        if (content) {
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{
+                type: "input_text", text:
+                  `[CODE_UPDATE] The participant's current code (${language}):\n\`\`\`${language}\n${content}\n\`\`\``,
+              }],
+            },
+          }));
+          // Acknowledge silently so it doesn't trigger a response
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "(Noted code update. I will conduct an oral code defense on the implementation.)" }],
+            },
+          }));
+        }
+      } else if (msg.type === "text" && msg.content) {
+        oaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{ type: "input_text", text: `[SYSTEM] Please say the following aloud: ${msg.content}` }],
+          },
+        }));
+        requestAssistantResponse("system say-aloud");
+      } else if (msg.type === "whiteboard_update") {
+        const imageDataUrl = (msg.imageDataUrl as string) || "";
+        if (imageDataUrl) {
+          // Send as an image in a user message
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{
+                type: "input_image",
+                image_url: imageDataUrl,
+              }],
+            },
+          }));
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "(Received whiteboard update.)" }],
+            },
+          }));
+          log.info("Whiteboard image sent to OpenAI");
+        }
+      } else if (msg.type === "proctor_alert") {
+        const alertType = (msg.alertType as string) || "";
+        const detail = (msg.detail as string) || "";
+        log.info(`[proctor] Anti-cheating event received: ${alertType} (${detail})`);
 
-      browserWs.on("close", () => {
-        log.info("Browser disconnected");
-        browserClosed = true;
-        clearInterval(keepaliveTimer);
-        clearInterval(livenessTimer);
-        clearPendingTransition();
-        clearQuestionPrompt();
-        clearSilenceGapTimer();
-        cleanupVolcAsr();
-        if (pendingInputFlush) clearTimeout(pendingInputFlush);
-        if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
-        if (interviewCompleteTimer) clearTimeout(interviewCompleteTimer);
-        oaiWs?.close();
-      });
+        const isCriticalAlert =
+          alertType === "face_missing" ||
+          alertType === "multiple_faces" ||
+          alertType === "face_mismatch" ||
+          alertType === "page_departure";
 
-      browserWs.on("error", (err) => {
-        log.error("Browser WS error:", err.message);
-      });
+        // For critical integrity alerts (face missing, multiple faces, face mismatch, page departure),
+        // immediately disrupt and smoothly warn the candidate without delay, even mid-speech.
+        if (!isCriticalAlert) {
+          const now = Date.now();
+          const isActivelySpeaking = userSpeechGateOpen && (now - lastVoiceEnergyTime < 800) && userSpeechPeakRmsThisSegment >= 400;
+          if (isActivelySpeaking) {
+            log.info(`[proctor] Queued pending spoken disruption for ${alertType} (candidate is actively speaking)`);
+            pendingProctorAlert = { alertType, detail, at: now };
+            return;
+          }
+        }
+
+        deliverProctorDisruption(alertType, detail);
+      } else if (msg.type === "time_expired") {
+        log.info("Interview time limit reached — triggering graceful spoken farewell");
+        cancelOngoingResponse();
+        interviewDone = true;
+        pendingInterviewComplete = true;
+
+        const farewellText = isZh
+          ? "抱歉打扰一下，本次面试的规定时间已经到了，我们今天的交流就到这里。非常感谢您今天的参与和详尽回答！招聘团队会尽快复核面试记录并与您联系后续事宜。祝您生活愉快，再见！"
+          : "Excuse me, I see our allotted time for this interview has reached its limit, so we will wrap things up here. Thank you so much for your time and thoughtful responses today! The recruiting team will review your session and be in touch soon. Have a wonderful day!";
+
+        if (oaiWs?.readyState === WebSocket.OPEN) {
+          oaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "system",
+              content: [{
+                type: "input_text",
+                text: `[SYSTEM INSTRUCTION - TIME LIMIT EXPIRED]: The interview time limit has just expired. Deliver this spoken farewell to the candidate word for word right now, and do NOT ask any further questions:\n"${farewellText}"`,
+              }],
+            },
+          }));
+          requestAssistantResponse("time expired farewell");
+
+          interviewCompleteTimer = setTimeout(() => {
+            if (pendingInterviewComplete) {
+              markInterviewComplete("timeout farewell fallback");
+            }
+          }, 12_000);
+        } else {
+          markInterviewComplete("relay already closed");
+        }
+      }
+    } catch (err) {
+      log.error("Error handling browser message:", err);
     }
+  });
+
+  browserWs.on("close", () => {
+    log.info("Browser disconnected");
+    browserClosed = true;
+    clearInterval(keepaliveTimer);
+    clearInterval(livenessTimer);
+    clearPendingTransition();
+    clearQuestionPrompt();
+    clearSilenceGapTimer();
+    cleanupVolcAsr();
+    if (pendingInputFlush) clearTimeout(pendingInputFlush);
+    if (pendingAsrUpdate) clearTimeout(pendingAsrUpdate);
+    if (interviewCompleteTimer) clearTimeout(interviewCompleteTimer);
+    oaiWs?.close();
+  });
+
+  browserWs.on("error", (err) => {
+    log.error("Browser WS error:", err.message);
+  });
+}

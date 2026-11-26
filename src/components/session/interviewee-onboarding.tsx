@@ -372,7 +372,11 @@ function CameraCheck({
       }
 
       setIsCapturing(false);
-      stopCamera();
+      // Detach local video without stopping the tracks so the active camera stream is preserved for the interview session
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      setStreaming(false);
       setPhoto(dataUrl);
       onDone();
     } catch (err) {
@@ -382,7 +386,11 @@ function CameraCheck({
   }, [stopCamera, onDone, sessionId]);
 
   const retake = useCallback(() => {
+    stopCamera();
+    setStoredCameraStream(null);
     setPhoto(null);
+    startCamera();
+  }, [stopCamera, startCamera]);
     setFaceDetected(null);
     startCamera();
   }, [startCamera]);

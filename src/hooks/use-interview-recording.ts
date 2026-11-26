@@ -136,7 +136,7 @@ export function useInterviewRecording({
   const acquireStreams = useCallback(async () => {
     // Reuse camera stream from onboarding if still active
     const storedCam = getStoredCameraStream();
-    if (storedCam) {
+    if (storedCam && storedCam.active && storedCam.getVideoTracks().some((t) => t.readyState === "live")) {
       setCameraStream(storedCam);
       cameraStreamRef.current = storedCam;
       setStoredCameraStream(null);
@@ -180,6 +180,13 @@ export function useInterviewRecording({
       }
     }
   }, []);
+
+  // Pre-acquire camera and screen streams on mount when enabled
+  useEffect(() => {
+    if (enabled && typeof window !== "undefined") {
+      void acquireStreams();
+    }
+  }, [enabled, acquireStreams]);
 
   /** Pipe a mic MediaStream into the recording mixer. */
   const attachMicStream = useCallback((micStream: MediaStream) => {
@@ -413,6 +420,8 @@ export function useInterviewRecording({
 
       // Start video recorder IMMEDIATELY synchronized with the audio mixer
       const videoTrack =
+        cameraStreamRef.current?.getVideoTracks().find((t) => t.readyState === "live") ||
+        screenStreamRef.current?.getVideoTracks().find((t) => t.readyState === "live") ||
         cameraStreamRef.current?.getVideoTracks()[0] ||
         screenStreamRef.current?.getVideoTracks()[0];
 
@@ -440,7 +449,7 @@ export function useInterviewRecording({
           videoRec.start(1000); // 1s timeslices for precise keyframes and lip sync
           videoRecorderRef.current = videoRec;
           videoStartTimeRef.current = Date.now();
-          log.info("Synchronized full video recorder started with MIME:", preferredVideoMime);
+          log.info("Synchronized full video recorder started with MIME:", preferredVideoMime || "default");
         } catch (vErr) {
           log.error("Failed to start video recorder:", vErr);
         }
@@ -503,7 +512,8 @@ export function useInterviewRecording({
       const vRecorder = videoRecorderRef.current;
       if (!vRecorder || vRecorder.state === "inactive") return resolve(null);
       vRecorder.onstop = () => {
-        const rawVideoBlob = new Blob(videoChunksRef.current, { type: "video/webm" });
+        const mime = vRecorder.mimeType || "video/webm";
+        const rawVideoBlob = new Blob(videoChunksRef.current, { type: mime });
         resolve(rawVideoBlob.size > 0 ? rawVideoBlob : null);
       };
       try {

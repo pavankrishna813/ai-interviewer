@@ -15,15 +15,25 @@ export async function GET(request: Request) {
   if (Number.isNaN(limit) || limit < 1) limit = 20;
   if (limit > 100) limit = 100;
   const cursor = searchParams.get("cursor") ?? undefined;
+  const organizationId = searchParams.get("organizationId") ?? undefined;
 
-  if (auth.projectIds.length === 0) {
+  let targetProjectIds = auth.projectIds;
+  if (organizationId) {
+    const { data: orgProjects } = await supabaseAdmin
+      .from("projects")
+      .select("id")
+      .eq("organizationId", organizationId);
+    targetProjectIds = (orgProjects ?? []).map((p) => p.id);
+  }
+
+  if (targetProjectIds.length === 0) {
     return Response.json({ data: [], cursor: null });
   }
 
   let query = supabaseAdmin
     .from("interviews")
     .select("*, questions(id), sessions(id)")
-    .in("projectId", auth.projectIds)
+    .in("projectId", targetProjectIds)
     .order("updatedAt", { ascending: false })
     .limit(limit + 1);
 
@@ -117,7 +127,7 @@ export async function POST(request: Request) {
 
   const chatEnabled = typeof body.chatEnabled === "boolean" ? body.chatEnabled : true;
   const voiceEnabled = typeof body.voiceEnabled === "boolean" ? body.voiceEnabled : false;
-  const videoEnabled = typeof body.videoEnabled === "boolean" ? body.videoEnabled : false;
+  const videoEnabled = typeof body.videoEnabled === "boolean" ? body.videoEnabled : (voiceEnabled || Boolean(body.antiCheatingEnabled));
   const aiName = typeof body.aiName === "string" && body.aiName.trim() ? body.aiName.trim() : "Troven";
   const aiTone = body.aiTone === "CASUAL" || body.aiTone === "PROFESSIONAL" || body.aiTone === "FORMAL" || body.aiTone === "FRIENDLY" ? body.aiTone : "PROFESSIONAL";
   const followUpDepth = body.followUpDepth === "LIGHT" || body.followUpDepth === "MODERATE" || body.followUpDepth === "DEEP" ? body.followUpDepth : "MODERATE";

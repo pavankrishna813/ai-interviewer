@@ -1356,49 +1356,52 @@ export function VoiceInterface({
     voice.interruptPlayback();
     voice.stopListening();
 
-    setLocallyCompleted(true);
     setIsSaving(true);
 
     try {
-      // Disconnect voice relay immediately so all audio playback & streaming stops instantly
-      await withTimeout(voice.disconnect(), 6000, "voice disconnect");
+      // 1. Kick off recording stop and S3 upload immediately in the background
+      const stopRecordingTask = (async () => {
+        try {
+          const result = await withTimeout(recording.stop(), 90_000, "stop recording");
+          if (result.audioUrl || result.videoUrl || (result.screenshots && result.screenshots.length > 0)) {
+            await withTimeout(
+              fetch("/api/trpc/session.saveRecording", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  json: {
+                    sessionId,
+                    audioRecordingUrl: result.audioUrl,
+                    videoRecordingUrl: result.videoUrl,
+                    audioDuration: result.audioDuration,
+                    screenshots: result.screenshots,
+                  },
+                }),
+              }),
+              15_000,
+              "save recording",
+            );
+          }
+        } catch (err) {
+          console.error("[voice] Failed to save recording:", err);
+        }
+      })();
 
+      // 2. Concurrently save drawings, code snippets, disconnect voice relay, and complete S3 recording upload
       await Promise.allSettled([
         withTimeout(saveAllDrawings(), 5000, "save drawings"),
         withTimeout(saveAllCodeSnippets(), 5000, "save code snippets"),
+        withTimeout(voice.disconnect(), 6000, "voice disconnect"),
+        stopRecordingTask,
       ]);
-
-      try {
-        // Stop recording and save artifacts (video mode)
-        if (videoMode && recording.isRecording) {
-          const result = await withTimeout(recording.stop(), 90_000, "stop recording");
-          await withTimeout(
-            fetch("/api/trpc/session.saveRecording", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                json: {
-                  sessionId,
-                  audioRecordingUrl: result.audioUrl,
-                  videoRecordingUrl: result.videoUrl,
-                  audioDuration: result.audioDuration,
-                  screenshots: result.screenshots,
-                },
-              }),
-            }),
-            15_000,
-            "save recording",
-          );
-        }
-      } catch (err) {
-        console.error("[voice] Failed to save recording:", err);
-      }
     } catch (err) {
       console.error("[voice] Failed to end interview cleanly:", err);
     } finally {
+      setIsSaving(false);
+      setLocallyCompleted(true);
       onComplete?.();
     }
-  }, [saveAllDrawings, saveAllCodeSnippets, videoMode, recording, sessionId, voice, onComplete]);
+  }, [saveAllDrawings, saveAllCodeSnippets, recording, sessionId, voice, onComplete]);
 
   useEffect(() => {
     handleEndInterviewRef.current = handleEndInterview;

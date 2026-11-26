@@ -60,6 +60,10 @@ export async function GET(
   }[];
 
   const overallScore = getSessionOverallScore(session.insights as SessionScoreInsights);
+  const insights = (session.insights as Record<string, unknown>) || {};
+  const videoRecordingUrl = (insights.videoRecordingUrl as string) || null;
+  const audioRecordingUrl = (session.audioRecordingUrl as string) || null;
+  const recordingUrl = videoRecordingUrl || audioRecordingUrl;
 
   return Response.json({
     data: {
@@ -73,7 +77,9 @@ export async function GET(
       themes: session.themes,
       sentiment: session.sentiment,
       totalDurationSeconds: session.totalDurationSeconds,
-      audioRecordingUrl: session.audioRecordingUrl,
+      audioRecordingUrl,
+      videoRecordingUrl,
+      recordingUrl,
       antiCheatingLog: session.antiCheatingLog,
       createdAt: session.createdAt,
       messages: messages.map((m) => ({

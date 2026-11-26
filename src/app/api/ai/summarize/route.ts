@@ -233,6 +233,8 @@ export async function POST(req: Request) {
       .eq("id", sessionId);
 
     const overallScore = getSessionOverallScore(finalInsights as SessionScoreInsights);
+    const videoUrl = (finalInsights.videoRecordingUrl as string) || null;
+    const audioUrl = (interviewSession.audioRecordingUrl as string) || null;
 
     // Asynchronously dispatch webhook to Troven and registered endpoints
     dispatchSessionCompletedWebhook(
@@ -246,6 +248,9 @@ export async function POST(req: Request) {
         score: overallScore,
         summary: String(parsed.summary ?? ""),
         insights: finalInsights,
+        recordingUrl: videoUrl || audioUrl,
+        videoRecordingUrl: videoUrl,
+        audioRecordingUrl: audioUrl,
       },
       interview.userId,
     ).catch((err) => log.warn("Webhook dispatch error:", err));

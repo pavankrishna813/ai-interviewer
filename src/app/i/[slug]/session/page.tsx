@@ -233,7 +233,7 @@ export default function SlugSessionPage() {
           initialDrawings={isResuming && resumeDrawings?.length ? resumeDrawings : undefined}
           chatEnabled={!!interview.data.chatEnabled}
           onComplete={handleComplete}
-          videoMode={isPreview ? false : !!interview.data.videoEnabled}
+          videoMode={isPreview ? false : Boolean(interview.data.videoEnabled || interview.data.antiCheatingEnabled || interview.data.voiceEnabled)}
           antiCheatingEnabled={antiCheatingEnabled}
         />
       </>
