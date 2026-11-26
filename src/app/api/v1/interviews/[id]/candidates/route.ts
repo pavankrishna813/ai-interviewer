@@ -119,7 +119,7 @@ export async function POST(
 
   const data = (created ?? []).map((row) => ({
     ...row,
-    inviteUrl: `${APP_BASE}/invite/${row.inviteToken as string}`,
+    inviteUrl: `${APP_BASE}/i/invite/${row.inviteToken as string}`,
   }));
 
   return Response.json({ data });

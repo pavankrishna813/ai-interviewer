@@ -4,7 +4,9 @@ import { createLogger } from "@/lib/logger";
 import { buildSummaryPrompt } from "@/lib/ai/prompts/summary";
 import { getProvider, REPORT_MODEL } from "@/lib/ai/registry";
 import { getAuthUser } from "@/lib/auth";
+import { getSessionOverallScore, type SessionScoreInsights } from "@/lib/session-score";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { dispatchSessionCompletedWebhook } from "@/lib/webhook-dispatcher";
 import { NextResponse } from "next/server";
 
 const log = createLogger("api/ai/summarize");
@@ -213,20 +215,40 @@ export async function POST(req: Request) {
       .single();
     const currentInsights = (currentSession?.insights as Record<string, unknown>) || {};
 
+    const finalInsights = {
+      ...currentInsights,
+      ...insightsData,
+      ...(currentInsights.videoRecordingUrl ? { videoRecordingUrl: currentInsights.videoRecordingUrl } : {}),
+      ...(currentInsights.screenshots ? { screenshots: currentInsights.screenshots } : {}),
+    };
+
     await supabaseAdmin
       .from("sessions")
       .update({
         summary: String(parsed.summary ?? ""),
         themes: (parsed.themes as string[]) ?? [],
         sentiment: parsed.sentiment ?? null,
-        insights: {
-          ...currentInsights,
-          ...insightsData,
-          ...(currentInsights.videoRecordingUrl ? { videoRecordingUrl: currentInsights.videoRecordingUrl } : {}),
-          ...(currentInsights.screenshots ? { screenshots: currentInsights.screenshots } : {}),
-        },
+        insights: finalInsights,
       })
       .eq("id", sessionId);
+
+    const overallScore = getSessionOverallScore(finalInsights as SessionScoreInsights);
+
+    // Asynchronously dispatch webhook to Troven and registered endpoints
+    dispatchSessionCompletedWebhook(
+      {
+        event: "session.completed",
+        sessionId,
+        interviewId: interviewSession.interviewId,
+        candidateEmail: interviewSession.participantEmail,
+        candidateName: interviewSession.participantName,
+        status: "COMPLETED",
+        score: overallScore,
+        summary: String(parsed.summary ?? ""),
+        insights: finalInsights,
+      },
+      interview.userId,
+    ).catch((err) => log.warn("Webhook dispatch error:", err));
 
     return NextResponse.json(parsed);
   } catch (error) {

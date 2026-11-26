@@ -3,6 +3,7 @@ import {
     isAuthError,
     validateApiKey,
 } from "@/lib/api-key-auth";
+import { getSessionOverallScore, type SessionScoreInsights } from "@/lib/session-score";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 
 type InterviewJoin = {
@@ -24,7 +25,7 @@ export async function GET(
   const { data: session, error } = await supabaseAdmin
     .from("sessions")
     .select(
-      "id, status, participantName, participantEmail, summary, insights, themes, sentiment, totalDurationSeconds, createdAt, interview:interviews!inner(id, title, objective, projectId), messages(id, role, content, timestamp)",
+      "id, status, participantName, participantEmail, summary, insights, themes, sentiment, totalDurationSeconds, audioRecordingUrl, antiCheatingLog, createdAt, interview:interviews!inner(id, title, objective, projectId), messages(id, role, content, timestamp)",
     )
     .eq("id", sessionId)
     .order("timestamp", { ascending: true, foreignTable: "messages" })
@@ -58,6 +59,8 @@ export async function GET(
     timestamp: string;
   }[];
 
+  const overallScore = getSessionOverallScore(session.insights as SessionScoreInsights);
+
   return Response.json({
     data: {
       id: session.id,
@@ -65,10 +68,13 @@ export async function GET(
       participantName: session.participantName,
       participantEmail: session.participantEmail,
       summary: session.summary,
+      overallScore,
       insights: session.insights,
       themes: session.themes,
       sentiment: session.sentiment,
       totalDurationSeconds: session.totalDurationSeconds,
+      audioRecordingUrl: session.audioRecordingUrl,
+      antiCheatingLog: session.antiCheatingLog,
       createdAt: session.createdAt,
       messages: messages.map((m) => ({
         id: m.id,
