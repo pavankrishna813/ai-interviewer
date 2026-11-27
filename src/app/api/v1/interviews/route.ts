@@ -263,14 +263,14 @@ export async function POST(request: Request) {
         if (text) {
           const type =
             typeof q.type === "string" &&
-            [
-              "OPEN_ENDED",
-              "SINGLE_CHOICE",
-              "MULTIPLE_CHOICE",
-              "CODING",
-              "WHITEBOARD",
-              "RESEARCH",
-            ].includes(q.type)
+              [
+                "OPEN_ENDED",
+                "SINGLE_CHOICE",
+                "MULTIPLE_CHOICE",
+                "CODING",
+                "WHITEBOARD",
+                "RESEARCH",
+              ].includes(q.type)
               ? q.type
               : "OPEN_ENDED";
           const isRequired =
