@@ -253,5 +253,34 @@ export async function POST(request: Request) {
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 
+  // If questions were provided in the payload, insert them directly into the questions table
+  if (Array.isArray(body.questions) && body.questions.length > 0 && interview?.id) {
+    const questionRows = [];
+    for (let i = 0; i < body.questions.length; i++) {
+      const q = body.questions[i];
+      if (q && typeof q === "object") {
+        const text = typeof q.text === "string" ? q.text.trim() : "";
+        if (text) {
+          const type = typeof q.type === "string" && ["OPEN_ENDED", "SINGLE_CHOICE", "MULTIPLE_CHOICE", "CODING", "WHITEBOARD", "RESEARCH"].includes(q.type)
+            ? q.type
+            : "OPEN_ENDED";
+          const isRequired = q.isRequired !== undefined ? Boolean(q.isRequired) : q.required !== undefined ? Boolean(q.required) : true;
+          questionRows.push({
+            interviewId: interview.id,
+            order: typeof q.order === "number" ? q.order : i,
+            text,
+            type,
+            isRequired,
+            options: Array.isArray(q.options) ? q.options : null,
+            probeOnShort: q.probeOnShort !== undefined ? Boolean(q.probeOnShort) : true,
+          });
+        }
+      }
+    }
+    if (questionRows.length > 0) {
+      await supabaseAdmin.from("questions").insert(questionRows);
+    }
+  }
+
   return Response.json({ data: interview });
 }

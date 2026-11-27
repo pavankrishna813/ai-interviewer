@@ -97,9 +97,11 @@ function normalizeOne(
   }
 
   const isRequired =
-    raw.required === undefined || raw.required === null
-      ? true
-      : Boolean(raw.required);
+    raw.required !== undefined && raw.required !== null
+      ? Boolean(raw.required)
+      : (raw as Record<string, unknown>).isRequired !== undefined && (raw as Record<string, unknown>).isRequired !== null
+        ? Boolean((raw as Record<string, unknown>).isRequired)
+        : true;
 
   let options: string[] | null = null;
   if (raw.options !== undefined && raw.options !== null) {

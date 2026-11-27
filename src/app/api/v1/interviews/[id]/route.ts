@@ -184,23 +184,81 @@ export async function PATCH(
     }
   }
 
-  if (Object.keys(patch).length === 0) {
+  const hasQuestions = Array.isArray(body.questions);
+
+  if (Object.keys(patch).length === 0 && !hasQuestions) {
     return apiError("BAD_REQUEST", "No valid fields to update.", 400);
   }
 
-  const { data: updated, error } = await supabaseAdmin
-    .from("interviews")
-    .update(patch)
-    .eq("id", id)
-    .in("projectId", auth.projectIds)
-    .select()
-    .maybeSingle();
+  let updated = null;
 
-  if (error) {
-    return apiError("INTERNAL_ERROR", error.message, 500);
+  if (Object.keys(patch).length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from("interviews")
+      .update(patch)
+      .eq("id", id)
+      .in("projectId", auth.projectIds)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      return apiError("INTERNAL_ERROR", error.message, 500);
+    }
+    if (!data) {
+      return apiError("NOT_FOUND", "Interview not found.", 404);
+    }
+    updated = data;
+  } else {
+    const { data: existing, error } = await supabaseAdmin
+      .from("interviews")
+      .select()
+      .eq("id", id)
+      .in("projectId", auth.projectIds)
+      .maybeSingle();
+
+    if (error) {
+      return apiError("INTERNAL_ERROR", error.message, 500);
+    }
+    if (!existing) {
+      return apiError("NOT_FOUND", "Interview not found.", 404);
+    }
+    updated = existing;
   }
-  if (!updated) {
-    return apiError("NOT_FOUND", "Interview not found.", 404);
+
+  // Update questions if provided in patch payload
+  if (hasQuestions && Array.isArray(body.questions)) {
+    await supabaseAdmin
+      .from("questions")
+      .delete()
+      .eq("interviewId", id);
+
+    if (body.questions.length > 0) {
+      const questionRows = [];
+      for (let i = 0; i < body.questions.length; i++) {
+        const q = body.questions[i];
+        if (q && typeof q === "object") {
+          const text = typeof q.text === "string" ? q.text.trim() : "";
+          if (text) {
+            const type = typeof q.type === "string" && ["OPEN_ENDED", "SINGLE_CHOICE", "MULTIPLE_CHOICE", "CODING", "WHITEBOARD", "RESEARCH"].includes(q.type)
+              ? q.type
+              : "OPEN_ENDED";
+            const isRequired = q.isRequired !== undefined ? Boolean(q.isRequired) : q.required !== undefined ? Boolean(q.required) : true;
+            questionRows.push({
+              interviewId: id,
+              order: typeof q.order === "number" ? q.order : i,
+              text,
+              type,
+              isRequired,
+              options: Array.isArray(q.options) ? q.options : null,
+              probeOnShort: q.probeOnShort !== undefined ? Boolean(q.probeOnShort) : true,
+            });
+          }
+        }
+      }
+      if (questionRows.length > 0) {
+        await supabaseAdmin.from("questions").insert(questionRows);
+      }
+    }
   }
 
   return Response.json({ data: updated });

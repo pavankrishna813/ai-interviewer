@@ -58,15 +58,25 @@ export async function validateApiKey(
 
   const userId: string = apiKey.userId;
 
-  const { data: membership } = await supabaseAdmin
+  // Retrieve all organizations the user is a member of or owns
+  const { data: memberships } = await supabaseAdmin
     .from("organization_members")
     .select("workspaceId")
-    .eq("userId", userId)
-    .order("workspaceId")
-    .limit(1)
-    .single();
+    .eq("userId", userId);
 
-  if (!membership?.workspaceId) {
+  const { data: ownedOrgs } = await supabaseAdmin
+    .from("organizations")
+    .select("id")
+    .eq("ownerId", userId);
+
+  const workspaceIds = Array.from(
+    new Set([
+      ...(memberships ?? []).map((m) => m.workspaceId),
+      ...(ownedOrgs ?? []).map((o) => o.id),
+    ]),
+  );
+
+  if (workspaceIds.length === 0) {
     return Response.json(
       {
         error: {
@@ -78,12 +88,13 @@ export async function validateApiKey(
     );
   }
 
-  const organizationId: string = membership.workspaceId;
+  const organizationId: string = workspaceIds[0]!;
 
+  // Fetch all projects across all accessible organizations
   const { data: projects } = await supabaseAdmin
     .from("projects")
     .select("id")
-    .eq("organizationId", organizationId);
+    .in("organizationId", workspaceIds);
 
   const allProjectIds = (projects ?? []).map((p) => p.id);
   const projectIds = await filterAccessibleProjectIds(
