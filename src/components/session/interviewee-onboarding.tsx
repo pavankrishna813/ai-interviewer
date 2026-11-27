@@ -389,11 +389,9 @@ function CameraCheck({
     stopCamera();
     setStoredCameraStream(null);
     setPhoto(null);
-    startCamera();
-  }, [stopCamera, startCamera]);
     setFaceDetected(null);
     startCamera();
-  }, [startCamera]);
+  }, [stopCamera, startCamera]);
 
   useEffect(() => {
     return () => {
