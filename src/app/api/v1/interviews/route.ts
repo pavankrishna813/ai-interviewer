@@ -257,22 +257,40 @@ export async function POST(request: Request) {
   if (Array.isArray(body.questions) && body.questions.length > 0 && interview?.id) {
     const questionRows = [];
     for (let i = 0; i < body.questions.length; i++) {
-      const q = body.questions[i];
+      const q = body.questions[i] as Record<string, unknown> | null | undefined;
       if (q && typeof q === "object") {
         const text = typeof q.text === "string" ? q.text.trim() : "";
         if (text) {
-          const type = typeof q.type === "string" && ["OPEN_ENDED", "SINGLE_CHOICE", "MULTIPLE_CHOICE", "CODING", "WHITEBOARD", "RESEARCH"].includes(q.type)
-            ? q.type
-            : "OPEN_ENDED";
-          const isRequired = q.isRequired !== undefined ? Boolean(q.isRequired) : q.required !== undefined ? Boolean(q.required) : true;
+          const type =
+            typeof q.type === "string" &&
+            [
+              "OPEN_ENDED",
+              "SINGLE_CHOICE",
+              "MULTIPLE_CHOICE",
+              "CODING",
+              "WHITEBOARD",
+              "RESEARCH",
+            ].includes(q.type)
+              ? q.type
+              : "OPEN_ENDED";
+          const isRequired =
+            q.isRequired !== undefined
+              ? Boolean(q.isRequired)
+              : q.required !== undefined
+                ? Boolean(q.required)
+                : true;
+          const options = Array.isArray(q.options)
+            ? (q.options.filter((o) => typeof o === "string") as string[])
+            : null;
           questionRows.push({
             interviewId: interview.id,
             order: typeof q.order === "number" ? q.order : i,
             text,
             type,
             isRequired,
-            options: Array.isArray(q.options) ? q.options : null,
-            probeOnShort: q.probeOnShort !== undefined ? Boolean(q.probeOnShort) : true,
+            options,
+            probeOnShort:
+              q.probeOnShort !== undefined ? Boolean(q.probeOnShort) : true,
           });
         }
       }
