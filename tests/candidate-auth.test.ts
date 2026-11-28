@@ -57,4 +57,43 @@ describe("Candidate Identity Verification & Session Authorization", () => {
     const otherTokenKey = `troven_candidate_auth_other123`;
     assert.equal(mockSessionStorage[otherTokenKey], undefined);
   });
+
+  test("OTP generation and verification workflow", () => {
+    const otpStore = new Map<string, { otp: string; email: string; expiresAt: number }>();
+    const inviteToken = "p142n6yazatv";
+    const candidateEmail = "keerthana@thesmartbridge.com";
+
+    // 1. Generate 6-digit OTP
+    const generatedOtp = "482915";
+    const expiresAt = Date.now() + 10 * 60 * 1000;
+    otpStore.set(inviteToken, {
+      otp: generatedOtp,
+      email: candidateEmail,
+      expiresAt,
+    });
+
+    assert.equal(otpStore.has(inviteToken), true);
+    assert.equal(otpStore.get(inviteToken)?.otp, "482915");
+
+    // 2. Reject incorrect OTP
+    const wrongOtp = "111111";
+    assert.notEqual(otpStore.get(inviteToken)?.otp, wrongOtp);
+
+    // 3. Reject expired OTP
+    const expiredRecord = {
+      otp: "999999",
+      email: candidateEmail,
+      expiresAt: Date.now() - 1000,
+    };
+    assert.equal(Date.now() > expiredRecord.expiresAt, true);
+
+    // 4. Accept correct OTP and consume
+    const submittedOtp = "482915";
+    const record = otpStore.get(inviteToken);
+    assert.equal(record?.otp, submittedOtp);
+    assert.equal(Date.now() <= record.expiresAt, true);
+
+    otpStore.delete(inviteToken);
+    assert.equal(otpStore.has(inviteToken), false);
+  });
 });

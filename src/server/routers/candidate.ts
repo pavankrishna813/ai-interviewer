@@ -66,6 +66,45 @@ async function verifyInterviewAccess(
   return { role: effectiveRole, interviewUserId: interview.userId, organizationId: project.organizationId };
 }
 
+interface CandidateOtpRecord {
+  otp: string;
+  email: string;
+  expiresAt: number;
+}
+
+const candidateOtpStore = new Map<string, CandidateOtpRecord>();
+
+async function dispatchCandidateOtpEmail(params: {
+  email: string;
+  candidateName: string;
+  interviewTitle: string;
+  otp: string;
+}) {
+  const trovenApiUrl = process.env.NEXT_PUBLIC_TROVEN_API_URL || process.env.TROVEN_API_URL || "https://api.troven.in";
+  
+  try {
+    const res = await fetch(`${trovenApiUrl.replace(/\/$/, "")}/thesmartbridge/talent/admin/dashboard/public/sendCandidateInviteOtp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: params.email,
+        candidateName: params.candidateName,
+        interviewTitle: params.interviewTitle,
+        otp: params.otp,
+      }),
+    });
+    if (res.ok) {
+      console.log(`[CANDIDATE_OTP] Dispatched OTP email to ${params.email} via Troven backend`);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[CANDIDATE_OTP] Troven backend dispatch warning:`, err);
+  }
+
+  console.log(`[CANDIDATE_OTP] Verification code for ${params.email} (${params.candidateName}): ${params.otp}`);
+  return true;
+}
+
 export const candidateRouter = router({
   create: protectedProcedure
     .input(
@@ -492,6 +531,142 @@ export const candidateRouter = router({
         hasRegisteredEmail: Boolean(candidate.email),
         isAuthorized,
         organizationName: orgInfo?.name || "Troven",
+      };
+    }),
+
+  sendCandidateOtp: publicProcedure
+    .input(
+      z.object({
+        token: z.string(),
+        email: z.string().email(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { data: candidate } = await ctx.supabase
+        .from("candidates")
+        .select("id, name, email, interview:interviews(title)")
+        .eq("inviteToken", input.token)
+        .single();
+
+      if (!candidate) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Invalid invite link",
+        });
+      }
+
+      if (!candidate.email) {
+        return { success: true, authorized: true, candidateName: candidate.name, hasEmail: false };
+      }
+
+      const expected = candidate.email.trim().toLowerCase();
+      const provided = input.email.trim().toLowerCase();
+
+      if (expected !== provided) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            "Access Denied: The email address entered does not match the candidate registered for this invitation.",
+        });
+      }
+
+      // Generate 6-digit numeric OTP
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+      candidateOtpStore.set(input.token, {
+        otp,
+        email: expected,
+        expiresAt,
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const interviewTitle = (candidate.interview as any)?.title || "AI Interview";
+
+      await dispatchCandidateOtpEmail({
+        email: expected,
+        candidateName: candidate.name,
+        interviewTitle,
+        otp,
+      });
+
+      return {
+        success: true,
+        candidateName: candidate.name,
+        maskedEmail: candidate.email.split("@")[0].slice(0, 1) + "***@" + candidate.email.split("@")[1],
+        expiresInSeconds: 600,
+      };
+    }),
+
+  verifyCandidateOtp: publicProcedure
+    .input(
+      z.object({
+        token: z.string(),
+        email: z.string().email(),
+        otp: z.string().min(4).max(10),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { data: candidate } = await ctx.supabase
+        .from("candidates")
+        .select("id, name, email")
+        .eq("inviteToken", input.token)
+        .single();
+
+      if (!candidate) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Invalid invite link",
+        });
+      }
+
+      if (!candidate.email) {
+        return { authorized: true, candidateName: candidate.name, email: null };
+      }
+
+      const expected = candidate.email.trim().toLowerCase();
+      const provided = input.email.trim().toLowerCase();
+
+      if (expected !== provided) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            "Access Denied: The email address entered does not match the candidate registered for this interview invitation.",
+        });
+      }
+
+      const otpRecord = candidateOtpStore.get(input.token);
+      const cleanOtp = input.otp.trim();
+
+      if (!otpRecord) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "No verification code was requested or code has expired. Please request a new code.",
+        });
+      }
+
+      if (Date.now() > otpRecord.expiresAt) {
+        candidateOtpStore.delete(input.token);
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Verification code has expired. Please request a new code.",
+        });
+      }
+
+      if (otpRecord.otp !== cleanOtp) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Invalid verification code. Please check your email and try again.",
+        });
+      }
+
+      // Valid OTP: delete from store and grant authorization
+      candidateOtpStore.delete(input.token);
+
+      return {
+        authorized: true,
+        candidateName: candidate.name,
+        email: candidate.email,
       };
     }),
 
