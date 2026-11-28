@@ -436,12 +436,17 @@ export const candidateRouter = router({
     }),
 
   getByToken: publicProcedure
-    .input(z.object({ token: z.string() }))
+    .input(
+      z.object({
+        token: z.string(),
+        candidateEmail: z.string().optional(),
+      }),
+    )
     .query(async ({ ctx, input }) => {
       const { data: candidate } = await ctx.supabase
         .from("candidates")
         .select(
-          "*, session:sessions(*), interview:interviews(*, questions(*))",
+          "*, session:sessions(*), interview:interviews(*, questions(*), project:projects!inner(organization:organizations!inner(name, slug)))",
         )
         .eq("inviteToken", input.token)
         .single();
@@ -462,6 +467,70 @@ export const candidateRouter = router({
         });
       }
 
-      return candidate;
+      const rawEmail = candidate.email?.trim().toLowerCase() || null;
+      let isAuthorized = !rawEmail; // If no email is attached, open access
+      if (rawEmail && input.candidateEmail) {
+        isAuthorized = input.candidateEmail.trim().toLowerCase() === rawEmail;
+      }
+
+      // Helper to mask email for security/privacy: k***a@domain.com
+      const maskEmail = (email: string | null) => {
+        if (!email) return "";
+        const parts = email.split("@");
+        if (parts.length < 2) return email;
+        const [local, domain] = parts;
+        if (local.length <= 2) return `${local[0]}*@${domain}`;
+        return `${local[0]}***${local[local.length - 1]}@${domain}`;
+      };
+
+      const orgInfo = interview.project?.organization;
+
+      return {
+        ...candidate,
+        email: isAuthorized ? candidate.email : null,
+        maskedEmail: maskEmail(candidate.email),
+        hasRegisteredEmail: Boolean(candidate.email),
+        isAuthorized,
+        organizationName: orgInfo?.name || "Troven",
+      };
+    }),
+
+  verifyCandidateIdentity: publicProcedure
+    .input(
+      z.object({
+        token: z.string(),
+        email: z.string().email(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { data: candidate } = await ctx.supabase
+        .from("candidates")
+        .select("id, name, email")
+        .eq("inviteToken", input.token)
+        .single();
+
+      if (!candidate) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Invalid invite link",
+        });
+      }
+
+      if (!candidate.email) {
+        return { authorized: true, candidateName: candidate.name };
+      }
+
+      const expected = candidate.email.trim().toLowerCase();
+      const provided = input.email.trim().toLowerCase();
+
+      if (expected !== provided) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            "Access Denied: The email address entered does not match the candidate registered for this interview invitation.",
+        });
+      }
+
+      return { authorized: true, candidateName: candidate.name };
     }),
 });

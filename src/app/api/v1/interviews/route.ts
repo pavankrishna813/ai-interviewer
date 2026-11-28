@@ -32,7 +32,7 @@ export async function GET(request: Request) {
 
   let query = supabaseAdmin
     .from("interviews")
-    .select("*, questions(id), sessions(id)")
+    .select("*, questions(id), sessions(id), candidates(id)")
     .in("projectId", targetProjectIds)
     .eq("isActive", true)
     .order("updatedAt", { ascending: false })
@@ -60,13 +60,15 @@ export async function GET(request: Request) {
     const r = { ...(row as Record<string, unknown>) };
     const questions = r.questions as { id: string }[] | null | undefined;
     const sessions = r.sessions as { id: string }[] | null | undefined;
+    const candidates = r.candidates as { id: string }[] | null | undefined;
     delete r.questions;
     delete r.sessions;
+    delete r.candidates;
     return {
       ...r,
       _count: {
         questions: questions?.length ?? 0,
-        sessions: sessions?.length ?? 0,
+        sessions: Math.max(sessions?.length ?? 0, candidates?.length ?? 0),
       },
     };
   });

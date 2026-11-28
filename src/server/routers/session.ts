@@ -163,7 +163,12 @@ export const sessionRouter = router({
     }),
 
   createFromInvite: publicProcedure
-    .input(z.object({ inviteToken: z.string() }))
+    .input(
+      z.object({
+        inviteToken: z.string(),
+        candidateEmail: z.string().optional(),
+      }),
+    )
     .mutation(async ({ ctx, input }) => {
       // Look up candidate + interview via the RPC
       const { data: candidate } = await ctx.supabase
@@ -180,6 +185,20 @@ export const sessionRouter = router({
       const interview = candidate.interview as any;
       if (!interview) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Interview is no longer available" });
+      }
+
+      // Strict candidate session authentication & authorization check:
+      // If the candidate invitation has an email registered, input.candidateEmail must match!
+      if (candidate.email) {
+        const expected = candidate.email.trim().toLowerCase();
+        const provided = input.candidateEmail?.trim().toLowerCase();
+        if (!provided || provided !== expected) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message:
+              "Access Denied: You are not authorized to start or join this interview session. The email address provided does not match the invited candidate.",
+          });
+        }
       }
 
       // If session already exists, return it

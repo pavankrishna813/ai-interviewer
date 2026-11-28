@@ -43,11 +43,27 @@ export default function InviteSessionPage() {
   useEffect(() => {
     if (candidate.isError) {
       router.replace(`/i/invite/${token}`);
+      return;
     }
     if (candidate.data) {
-      const session = (candidate.data as any).session;
+      const cData = candidate.data as any;
+      const session = cData.session;
       if (!session) {
         router.replace(`/i/invite/${token}`);
+        return;
+      }
+
+      // If candidate has an email registered, enforce active verified browser session
+      if (cData.hasRegisteredEmail) {
+        let authEmail: string | null = null;
+        try {
+          authEmail = sessionStorage.getItem("troven_candidate_auth_" + token);
+        } catch {
+          // storage unavailable
+        }
+        if (!authEmail) {
+          router.replace(`/i/invite/${token}`);
+        }
       }
     }
   }, [candidate.data, candidate.isError, token, router]);

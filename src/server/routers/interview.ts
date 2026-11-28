@@ -155,7 +155,7 @@ export const interviewRouter = router({
       let query = ctx.supabase
         .from("interviews")
         .select(
-          "*, questions(id), sessions(id), project:projects!inner(id, organizationId)",
+          "*, questions(id), sessions(id), candidates(id), project:projects!inner(id, organizationId)",
         )
         .order("updatedAt", { ascending: false })
         .limit(limit + 1);
@@ -228,15 +228,20 @@ export const interviewRouter = router({
       const { data: raw } = await query;
       const rows = raw ?? [];
 
-      const interviews = rows.slice(0, limit).map((i) => ({
-        ...i,
-        _count: {
-          questions: (i.questions as { id: string }[])?.length ?? 0,
-          sessions: (i.sessions as { id: string }[])?.length ?? 0,
-        },
-        questions: undefined,
-        sessions: undefined,
-      }));
+      const interviews = rows.slice(0, limit).map((i) => {
+        const sessionCount = (i.sessions as { id: string }[])?.length ?? 0;
+        const candidateCount = (i.candidates as { id: string }[])?.length ?? 0;
+        return {
+          ...i,
+          _count: {
+            questions: (i.questions as { id: string }[])?.length ?? 0,
+            sessions: Math.max(sessionCount, candidateCount),
+          },
+          questions: undefined,
+          sessions: undefined,
+          candidates: undefined,
+        };
+      });
 
       let nextCursor: string | undefined;
       if (rows.length > limit) {
@@ -265,7 +270,7 @@ export const interviewRouter = router({
       // Re-fetch with full data
       const { data: interview } = await ctx.supabase
         .from("interviews")
-        .select("*, questions(*), sessions(id)")
+        .select("*, questions(*), sessions(id), candidates(id)")
         .eq("id", input.id)
         .order("order", { referencedTable: "questions", ascending: true })
         .single();
@@ -274,10 +279,13 @@ export const interviewRouter = router({
         throw new TRPCError({ code: "NOT_FOUND" });
       }
 
+      const sessionCount = (interview.sessions as { id: string }[])?.length ?? 0;
+      const candidateCount = (interview.candidates as { id: string }[])?.length ?? 0;
+
       return {
         ...interview,
         _count: {
-          sessions: (interview.sessions as { id: string }[])?.length ?? 0,
+          sessions: Math.max(sessionCount, candidateCount),
         },
       };
     }),

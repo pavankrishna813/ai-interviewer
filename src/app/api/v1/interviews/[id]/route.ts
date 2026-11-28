@@ -20,7 +20,7 @@ export async function GET(
 
   const { data: interview, error } = await supabaseAdmin
     .from("interviews")
-    .select("*, questions(*), sessions(id)")
+    .select("*, questions(*), sessions(id), candidates(id)")
     .eq("id", id)
     .in("projectId", auth.projectIds)
     .order("order", { referencedTable: "questions", ascending: true })
@@ -35,13 +35,15 @@ export async function GET(
 
   const copy = { ...(interview as Record<string, unknown>) };
   const sessions = copy.sessions as { id: string }[] | null | undefined;
+  const candidates = copy.candidates as { id: string }[] | null | undefined;
   delete copy.sessions;
+  delete copy.candidates;
 
   return Response.json({
     data: {
       ...copy,
       _count: {
-        sessions: sessions?.length ?? 0,
+        sessions: Math.max(sessions?.length ?? 0, candidates?.length ?? 0),
       },
     },
   });
