@@ -74,31 +74,53 @@ interface CandidateOtpRecord {
 
 const candidateOtpStore = new Map<string, CandidateOtpRecord>();
 
+function maskEmail(email: string | null | undefined): string {
+  if (!email) return "";
+  const parts = email.trim().split("@");
+  if (parts.length < 2) return email;
+  const [local, domain] = parts;
+  if (local.length <= 2) return `${local[0]}*@${domain}`;
+  return `${local[0]}***${local[local.length - 1]}@${domain}`;
+}
+
 async function dispatchCandidateOtpEmail(params: {
   email: string;
   candidateName: string;
   interviewTitle: string;
   otp: string;
 }) {
-  const trovenApiUrl = process.env.NEXT_PUBLIC_TROVEN_API_URL || process.env.TROVEN_API_URL || "https://api.troven.in";
-  
-  try {
-    const res = await fetch(`${trovenApiUrl.replace(/\/$/, "")}/thesmartbridge/talent/admin/dashboard/public/sendCandidateInviteOtp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: params.email,
-        candidateName: params.candidateName,
-        interviewTitle: params.interviewTitle,
-        otp: params.otp,
-      }),
-    });
-    if (res.ok) {
-      console.log(`[CANDIDATE_OTP] Dispatched OTP email to ${params.email} via Troven backend`);
-      return true;
+  const backendBase = (
+    process.env.TROVEN_API_URL ||
+    process.env.NEXT_PUBLIC_TROVEN_API_URL ||
+    "https://trovenbackend.smartinternz.com"
+  ).replace(/\/$/, "");
+
+  // Candidate OTP endpoints in priority order (standalone public endpoint first)
+  const candidateEndpoints = [
+    `${backendBase}/public/sendCandidateInviteOtp`,
+    "https://trovenbackend.smartinternz.com/public/sendCandidateInviteOtp",
+    `${backendBase}/thesmartbridge/talent/admin/dashboard/public/sendCandidateInviteOtp`,
+  ];
+
+  for (const endpoint of candidateEndpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: params.email,
+          candidateName: params.candidateName,
+          interviewTitle: params.interviewTitle,
+          otp: params.otp,
+        }),
+      });
+      if (res.ok) {
+        console.log(`[CANDIDATE_OTP] Dispatched OTP email to ${params.email} via Troven backend (${endpoint})`);
+        return true;
+      }
+    } catch (err) {
+      console.warn(`[CANDIDATE_OTP] Troven backend dispatch warning (${endpoint}):`, err);
     }
-  } catch (err) {
-    console.warn(`[CANDIDATE_OTP] Troven backend dispatch warning:`, err);
   }
 
   console.log(`[CANDIDATE_OTP] Verification code for ${params.email} (${params.candidateName}): ${params.otp}`);
@@ -512,16 +534,6 @@ export const candidateRouter = router({
         isAuthorized = input.candidateEmail.trim().toLowerCase() === rawEmail;
       }
 
-      // Helper to mask email for security/privacy: k***a@domain.com
-      const maskEmail = (email: string | null) => {
-        if (!email) return "";
-        const parts = email.split("@");
-        if (parts.length < 2) return email;
-        const [local, domain] = parts;
-        if (local.length <= 2) return `${local[0]}*@${domain}`;
-        return `${local[0]}***${local[local.length - 1]}@${domain}`;
-      };
-
       const orgInfo = interview.project?.organization;
 
       return {
@@ -593,7 +605,7 @@ export const candidateRouter = router({
       return {
         success: true,
         candidateName: candidate.name,
-        maskedEmail: candidate.email.split("@")[0].slice(0, 1) + "***@" + candidate.email.split("@")[1],
+        maskedEmail: maskEmail(candidate.email),
         expiresInSeconds: 600,
       };
     }),
